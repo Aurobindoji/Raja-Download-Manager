@@ -1,0 +1,21 @@
+{
+  "manifest_version": 3,
+  "name": "Raja Download Manager",
+  "version": "0.2.0",
+  "description": "Choose a video quality or send links to the RAJA Download Manager.",
+  "permissions": ["contextMenus", "nativeMessaging"],
+  "host_permissions": ["http://*/*", "https://*/*"],
+  "background": {
+    "service_worker": "background.js"
+  },
+  "content_scripts": [
+    {
+      "matches": ["http://*/*", "https://*/*"],
+      "js": ["content.js"],
+      "run_at": "document_idle"
+    }
+  ],
+  "action": {
+    "default_title": "Raja Download Manager"
+  }
+}

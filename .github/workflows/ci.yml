@@ -1,0 +1,94 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - run: cargo fmt --all -- --check
+      - run: cargo test --workspace --locked
+      - run: cargo clippy --workspace --all-targets --locked -- -D warnings
+      - run: cargo build --release --bins --locked
+      - name: Validate browser integration
+        shell: pwsh
+        run: |
+          $files = @(
+            "scripts/package-windows.ps1",
+            "Install-RajaBrowserIntegration.ps1",
+            "Uninstall-RajaBrowserIntegration.ps1"
+          )
+          foreach ($file in $files) {
+            $tokens = $null
+            $errors = $null
+            [System.Management.Automation.Language.Parser]::ParseFile(
+              $file, [ref]$tokens, [ref]$errors
+            ) | Out-Null
+            if ($errors.Count -gt 0) {
+              throw "$file has PowerShell syntax errors: $errors"
+            }
+          }
+          Get-Content "browser-extension/manifest.json" -Raw | ConvertFrom-Json | Out-Null
+          node --check "browser-extension/background.js"
+          node --check "browser-extension/content.js"
+          $extension = Get-Content "browser-extension/manifest.json" -Raw | ConvertFrom-Json
+          if ($extension.version -ne "0.2.0" -or "nativeMessaging" -notin $extension.permissions) {
+            throw "Browser extension is missing the native-messaging bridge permission."
+          }
+          $manifest = Get-Content "Cargo.toml" -Raw
+          if ($manifest -notmatch '(?m)^version = "([^"]+)"') {
+            throw "Could not read the Cargo package version."
+          }
+          $version = $Matches[1]
+          $installer = Get-Content "installer/Raja.iss" -Raw
+          $installerVersion = [regex]::Match(
+            $installer, '(?m)^#define MyAppVersion "([^"]+)"\r?$'
+          ).Groups[1].Value
+          if (-not $installerVersion -or $installerVersion -ne $version) {
+            throw "installer/Raja.iss version does not match Cargo.toml ($version)."
+          }
+          if ($installer -notmatch 'NativeMessagingHosts' -or
+              $installer -notmatch 'com\.raja\.browser\.json' -or
+              $installer -notmatch 'chrome-extension://fgloankgfdmmebbalhnnloijbeihdbgc/' -or
+              $installer -notmatch 'Raja Download Manager".*--background') {
+            throw "installer/Raja.iss is missing native messaging or tray startup registration."
+          }
+          if ($env:GITHUB_REF -like "refs/tags/*" -and $env:GITHUB_REF_NAME -ne "v$version") {
+            throw "Release tag must be v$version to match the package version."
+          }
+      - name: Package portable Windows build
+        run: pwsh -File scripts/package-windows.ps1 -OutputDirectory target/package
+      - name: Install Inno Setup
+        run: choco install innosetup --yes --no-progress
+      - name: Build Windows installer
+        run: '& "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe" /Otarget\installer installer\Raja.iss'
+      - uses: actions/upload-artifact@v4
+        with:
+          name: raja-windows-x64
+          path: |
+            target/package/*.zip
+            target/installer/*.exe
+          if-no-files-found: error
+
+  release:
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: test
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: raja-windows-x64
+          path: dist
+      - name: Publish GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release create "$GITHUB_REF_NAME" dist/* --repo "$GITHUB_REPOSITORY" --generate-notes --title "RAJA $GITHUB_REF_NAME"

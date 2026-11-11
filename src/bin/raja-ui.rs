@@ -147,6 +147,12 @@ struct RajaUi {
     add_description: String,
     add_dialog_max_height: Option<u32>,
     add_dialog_file_size: Option<u64>,
+    /// Background check of the link in the "Download File Info" box.
+    add_probe: AddProbe,
+    /// Why the engine refused the last link (shown in the box).
+    add_error: Option<String>,
+    /// Last "Raja: ..." error line printed by the download engine.
+    last_core_error: Option<String>,
     default_download_directory: String,
     database: String,
     core_executable: PathBuf,
@@ -462,6 +468,9 @@ impl RajaUi {
             add_description: String::new(),
             add_dialog_max_height: None,
             add_dialog_file_size: None,
+            add_probe: AddProbe::default(),
+            add_error: None,
+            last_core_error: None,
             default_download_directory: default_download_dir_str.clone(),
             database: database.to_string_lossy().into_owned(),
             core_executable,
@@ -1732,6 +1741,8 @@ impl RajaUi {
             let output_path = PathBuf::from(&cat_dir).join(&file_name);
 
             self.url = url;
+            self.add_error = None;
+            self.add_probe = AddProbe::default();
             self.video_page_download = is_video;
             self.add_dialog_category = cat;
             self.add_category_dir = cat_dir;
@@ -2419,6 +2430,9 @@ impl RajaUi {
                     self.status = format!("Could not save video progress: {error}");
                 }
             } else {
+                if let Some(error) = line.strip_prefix("Raja: ") {
+                    self.last_core_error = Some(error.trim().to_owned());
+                }
                 self.status = line;
             }
         }
@@ -2447,6 +2461,34 @@ impl RajaUi {
             self.status = format!("Could not check Raja process: {error}");
         }
         for (queue_download, kind, video_download, stop_requested, status) in completed {
+            if kind == ProcessKind::Core
+                && !status.success()
+                && video_download.is_none()
+                && queue_download.is_none()
+                && self.pending_progress_url.is_some()
+                && !self
+                    .downloads
+                    .iter()
+                    .any(|d| Some(&d.source_url) == self.pending_progress_url.as_ref())
+            {
+                // The engine refused the link before creating a download:
+                // show the "Download File Info" box again with the reason
+                // instead of a progress window waiting forever.
+                self.pending_progress_url = None;
+                self.show_active_progress_dialog = false;
+                self.active_progress_download_id = None;
+                let reason = self
+                    .last_core_error
+                    .take()
+                    .unwrap_or_else(|| format!("The download engine stopped ({status})."));
+                self.add_error = Some(explain_engine_error(&reason));
+                self.show_add_dialog = true;
+                if self.compact_view.is_some() {
+                    self.compact_view = Some(CompactView::AddDownload);
+                    self.compact_title.clear();
+                }
+                continue;
+            }
             if let Some(download_id) = video_download
                 && !stop_requested
             {
@@ -4796,6 +4838,25 @@ fn draw_add_download_dialog(app: &mut RajaUi, context: &egui::Context) -> Option
     let mut open = true;
     let mut start_download = false;
     let mut download_later = false;
+    let plain_file = !app.video_page_download
+        && !is_torrent_source(app.url.trim())
+        && !is_likely_video_page_url(app.url.trim());
+    if plain_file {
+        app.add_probe.ensure(app.url.trim());
+        if let Some(result) = app.add_probe.poll()
+            && app.add_dialog_file_size.is_none()
+        {
+            app.add_dialog_file_size = result.size;
+        }
+        if app.add_probe.is_running() {
+            context.request_repaint_after(Duration::from_millis(200));
+        }
+    }
+    let page_warning = plain_file
+        && app
+            .add_probe
+            .result()
+            .is_some_and(|result| result.is_web_page && result.size.is_none());
     let compact = app.compact_view.is_some() || app.dialog_in_own_window;
 
     let window = egui::Window::new("Download File Info")
@@ -5096,6 +5157,31 @@ fn draw_add_download_dialog(app: &mut RajaUi, context: &egui::Context) -> Option
                             egui::TextEdit::singleline(&mut app.add_description),
                         );
                     });
+
+                    // Why this link cannot be downloaded, in plain words.
+                    let notice = app.add_error.clone().or_else(|| {
+                        page_warning.then(|| {
+                            "This link opens a web page, not a file. On the page, \
+                             right-click the actual download link (for example \
+                             the .iso or .zip) and choose \"Download with Raja\"."
+                                .to_owned()
+                        })
+                    });
+                    if let Some(notice) = notice {
+                        ui.add_space(4.0);
+                        ui.horizontal(|ui| {
+                            ui.add_space(label_w + 8.0);
+                            ui.add_sized(
+                                [form_w - label_w - 8.0, 34.0],
+                                egui::Label::new(
+                                    egui::RichText::new(notice)
+                                        .size(12.0)
+                                        .color(rgb(255, 150, 140)),
+                                )
+                                .wrap(),
+                            );
+                        });
+                    }
                 });
 
                 // Right Column: VLC-style 3D Cone / Category Icon + File Size
@@ -5113,7 +5199,11 @@ fn draw_add_download_dialog(app: &mut RajaUi, context: &egui::Context) -> Option
                         .unwrap_or_else(|| {
                             // Never invent a size: the real one is reported by
                             // yt-dlp once the download starts.
-                            if app.add_dialog_category == AddFileCategory::Video {
+                            if plain_file && app.add_probe.is_running() {
+                                "Checking size...".to_owned()
+                            } else if app.add_dialog_category == AddFileCategory::Video
+                                || plain_file
+                            {
                                 "Size unknown".to_owned()
                             } else {
                                 String::new()
@@ -5132,7 +5222,8 @@ fn draw_add_download_dialog(app: &mut RajaUi, context: &egui::Context) -> Option
             ui.add_space(12.0);
 
             // Bottom Row: [ Download Later ]   [ Start Download ]   [ Cancel ]
-            let can_submit = !app.url.trim().is_empty() && !app.output.trim().is_empty();
+            let can_submit =
+                !app.url.trim().is_empty() && !app.output.trim().is_empty() && !page_warning;
             ui.horizontal(|ui| {
                 ui.add_space(92.0);
                 let btn_size = egui::vec2(138.0, 26.0);
@@ -5234,6 +5325,8 @@ fn draw_add_download_dialog(app: &mut RajaUi, context: &egui::Context) -> Option
         }
         app.pending_progress_url = Some(trimmed_url);
         app.show_active_progress_dialog = true;
+        app.last_core_error = None;
+        app.add_error = None;
         app.run_core(&args);
         app.show_add_dialog = false;
     }
@@ -7687,6 +7780,109 @@ fn category_directory_path(base_dir: &str, cat: AddFileCategory) -> String {
     s
 }
 
+/// What the server says about a link before downloading it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct LinkInfo {
+    size: Option<u64>,
+    is_web_page: bool,
+}
+
+/// Checks the link in the add box in the background (size and type), so the
+/// box can show the size like IDM, and warn when the link is a web page.
+#[derive(Default)]
+struct AddProbe {
+    url: String,
+    receiver: Option<Receiver<Option<LinkInfo>>>,
+    result: Option<LinkInfo>,
+}
+
+impl AddProbe {
+    fn ensure(&mut self, url: &str) {
+        if url == self.url {
+            return;
+        }
+        self.url = url.to_owned();
+        self.result = None;
+        self.receiver = None;
+        let Ok(url) = validate_external_url(url) else {
+            return;
+        };
+        let (sender, receiver) = mpsc::channel();
+        self.receiver = Some(receiver);
+        std::thread::spawn(move || {
+            let _ = sender.send(probe_link(&url));
+        });
+    }
+
+    fn poll(&mut self) -> Option<&LinkInfo> {
+        if let Some(receiver) = &self.receiver
+            && let Ok(result) = receiver.try_recv()
+        {
+            self.receiver = None;
+            self.result = result;
+            return self.result.as_ref();
+        }
+        None
+    }
+
+    fn is_running(&self) -> bool {
+        self.receiver.is_some()
+    }
+
+    fn result(&self) -> Option<&LinkInfo> {
+        self.result.as_ref()
+    }
+}
+
+/// Asks the server for the first byte only: enough to learn the full size
+/// (Content-Range / Content-Length) and the type, without downloading.
+fn probe_link(url: &str) -> Option<LinkInfo> {
+    let client = reqwest::blocking::Client::builder()
+        .connect_timeout(Duration::from_secs(10))
+        .timeout(Duration::from_secs(20))
+        .build()
+        .ok()?;
+    let response = client
+        .get(url)
+        .header(reqwest::header::RANGE, "bytes=0-0")
+        .header(reqwest::header::ACCEPT_ENCODING, "identity")
+        .send()
+        .ok()?;
+    let headers = response.headers();
+    let text = |name| {
+        headers
+            .get(name)
+            .and_then(|value: &reqwest::header::HeaderValue| value.to_str().ok())
+    };
+    let size = match response.status().as_u16() {
+        206 => text(reqwest::header::CONTENT_RANGE)
+            .and_then(|range| range.rsplit_once('/'))
+            .and_then(|(_, total)| total.trim().parse::<u64>().ok()),
+        200 => text(reqwest::header::CONTENT_LENGTH).and_then(|len| len.trim().parse().ok()),
+        _ => None,
+    }
+    .filter(|&size| size > 0);
+    let is_web_page = text(reqwest::header::CONTENT_TYPE).is_some_and(|kind| {
+        let kind = kind.to_ascii_lowercase();
+        kind.starts_with("text/html") || kind.starts_with("application/xhtml")
+    });
+    Some(LinkInfo { size, is_web_page })
+}
+
+/// Engine errors as a user can act on them.
+fn explain_engine_error(error: &str) -> String {
+    let lower = error.to_ascii_lowercase();
+    if lower.contains("omitted content-length") {
+        "The server did not say how big this is, so Raja cannot download it safely. \
+         If this is a web page, right-click the actual download link on it instead."
+            .to_owned()
+    } else if lower.contains("already exists") {
+        "A file with this name already exists. Choose another name in \"Save As\".".to_owned()
+    } else {
+        format!("Could not start the download: {error}")
+    }
+}
+
 enum UpdateEvent {
     Checked(Result<Option<update::UpdateInfo>, String>),
     Progress(u64, Option<u64>),
@@ -9238,12 +9434,12 @@ fn render_3d_app_icon(size: usize) -> Vec<u8> {
 mod tests {
     use super::{
         DownloadCategory, ProgressSample, VideoStreams, browser_suggested_filename,
-        explain_ytdlp_error, format_duration, last_attempt_label, lossy_lines, parse_launch_url,
-        parse_server_url_line, parse_video_error_line, parse_video_output_line,
-        parse_video_progress_line, parse_video_size_line, queueable_download_ids,
-        suggested_filename, time_left_label, transfer_rate_label, use_saved_video_info,
-        video_extraction_arguments, video_extraction_arguments_for_height, video_job_arguments,
-        video_output_template,
+        explain_engine_error, explain_ytdlp_error, format_duration, last_attempt_label,
+        lossy_lines, parse_launch_url, parse_server_url_line, parse_video_error_line,
+        parse_video_output_line, parse_video_progress_line, parse_video_size_line,
+        queueable_download_ids, suggested_filename, time_left_label, transfer_rate_label,
+        use_saved_video_info, video_extraction_arguments, video_extraction_arguments_for_height,
+        video_job_arguments, video_output_template,
     };
     use raja_core::storage::DownloadSummary;
     use std::ffi::OsString;
@@ -9352,6 +9548,20 @@ mod tests {
             ))
         );
         assert_eq!(parse_server_url_line("RAJA_SERVER_URL:5:NA"), None);
+    }
+
+    #[test]
+    fn explains_engine_errors_in_plain_words() {
+        let page = explain_engine_error("server omitted Content-Length for a full-file response");
+        assert!(
+            page.contains("web page") && page.contains("download link"),
+            "{page}"
+        );
+        assert!(
+            explain_engine_error("output file already exists; choose a different name")
+                .contains("Save As")
+        );
+        assert!(explain_engine_error("odd").starts_with("Could not start the download: odd"));
     }
 
     #[test]

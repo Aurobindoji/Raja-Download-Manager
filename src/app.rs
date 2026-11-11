@@ -211,7 +211,6 @@ fn download_one(
     }
 
     let client = HttpRangeClient::new()?;
-    let remote = client.probe(url)?;
     let final_name = final_path
         .file_name()
         .and_then(|name| name.to_str())
@@ -220,6 +219,19 @@ fn download_one(
         .to_str()
         .ok_or_else(|| invalid_input("output directory must be valid Unicode"))?;
     let existing = storage.find_resumable_download(output_dir, final_name)?;
+    // Resume from the same mirror the download started on (its copy has the
+    // ETag the saved segments were checked against); otherwise follow the
+    // link's redirect once and pin the result for every segment.
+    let pinned = existing.as_ref().and_then(|existing| {
+        storage
+            .download_server_urls()
+            .ok()
+            .and_then(|urls| urls.get(&existing.id).cloned())
+    });
+    let remote = match pinned.as_deref().map(|pinned| client.probe(pinned)) {
+        Some(Ok(remote)) => remote,
+        _ => client.probe(url)?,
+    };
     let (download_id, segment_ids, part_file, effective_expected_sha256) = if let Some(existing) =
         existing
     {
@@ -307,6 +319,7 @@ fn download_one(
         )
     };
 
+    storage.set_download_server_url(download_id, &remote.final_url)?;
     let segments_restarted = part_file.verify_durable_blocks(&mut storage, &segment_ids)?;
     if segments_restarted > 0 {
         eprintln!(
@@ -344,7 +357,7 @@ fn download_one(
         let progress_worker = spawn_progress_reporter(&database_path, download_id)?;
         let download_result = download_segments(
             &client,
-            url,
+            &remote.final_url,
             &part_file,
             &database_path,
             &mut storage,

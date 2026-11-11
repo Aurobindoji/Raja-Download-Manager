@@ -6,7 +6,7 @@
 
 Most download managers treat speed as the only goal. RAJA treats **"the file on disk is exactly the file on the server"** as a hard rule, and gets speed on top of that.
 
-- **Multi-connection downloads.** A file is split into byte ranges that download in parallel (1–32 connections, 8 by default, at least 1 MB per segment). Splitting is used only when the server really supports ranges *and* gives a validator (ETag or Last-Modified); otherwise RAJA falls back to one safe connection instead of risking a mixed-up file.
+- **Multi-connection downloads.** A file is split into byte ranges that download in parallel (1–32 connections, 8 by default, at least 1 MB per segment). Splitting is used only when the server really supports ranges *and* gives a validator (ETag or Last-Modified); otherwise RAJA falls back to one safe connection instead of risking a mixed-up file. When a site redirects to mirrors, the redirect is resolved once and every connection uses that same mirror (also on resume).
 - **Durable progress, not optimistic progress.** Every block is written to the part file and flushed to disk *before* its position is recorded. The download state lives in SQLite with WAL journaling and `synchronous = FULL`, so after a power cut or crash the shown progress never claims bytes that are not really on disk.
 - **SHA-256 per block.** Each written block is hashed and the hash is stored. On resume, RAJA re-reads and re-checks those blocks; a segment whose data does not match is downloaded again rather than trusted.
 - **Server-change detection.** Resumed ranges are requested with `If-Range` and the stored ETag/Last-Modified. If the file on the server has changed, the download stops with a clear error instead of stitching old and new bytes together.
@@ -30,8 +30,8 @@ Most download managers treat speed as the only goal. RAJA treats **"the file on 
 ## Quick Start
 
 ### 1. Install or run
-- **Installer:** run `Raja-0.2.6-Setup-x64.exe` (installs to `%LOCALAPPDATA%\Programs\Raja` and registers the browser native-messaging host).
-- **Portable:** extract `Raja-0.2.6-windows-x64.zip` and run `raja-ui.exe`.
+- **Installer:** run `Raja-0.2.7-Setup-x64.exe` (installs to `%LOCALAPPDATA%\Programs\Raja` and registers the browser native-messaging host).
+- **Portable:** extract `Raja-0.2.7-windows-x64.zip` and run `raja-ui.exe`.
 
 ### 2. Load the browser extension (Chrome / Edge / Brave)
 1. Open `chrome://extensions` (or `edge://extensions`) and turn on **Developer mode**.

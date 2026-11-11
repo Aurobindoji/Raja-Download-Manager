@@ -219,6 +219,10 @@ pub struct HttpRangeClient {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RemoteFile {
+    /// Address after following redirects. Download sites often send each
+    /// request to a different mirror, and each mirror's copy carries its own
+    /// ETag; every segment must therefore come from this one address.
+    pub final_url: String,
     pub size: u64,
     pub validators: SourceValidators,
     pub supports_ranges: bool,
@@ -245,6 +249,7 @@ impl HttpRangeClient {
             .header(ACCEPT_ENCODING, "identity")
             .send()
             .map_err(|error| HttpRangeError::Request(error.without_url()))?;
+        let final_url = response.url().to_string();
         let supports_ranges = response.status().as_u16() == 206;
         let size = match response.status().as_u16() {
             206 => validate_content_range(&response, 0, 0, None)?,
@@ -285,6 +290,7 @@ impl HttpRangeClient {
         }
         let validators = response_validators(&response)?;
         Ok(RemoteFile {
+            final_url,
             size,
             validators,
             supports_ranges,

@@ -5754,21 +5754,17 @@ fn draw_forget_download_dialog(app: &mut RajaUi, context: &egui::Context) {
         .default_width(470.0)
         .frame(
             egui::Frame::new()
-                .fill(egui::Color32::from_rgb(245, 245, 247))
-                .stroke(egui::Stroke::new(1.0, egui::Color32::from_rgb(185, 185, 192)))
+                .fill(egui::Color32::from_rgb(35, 35, 38))
+                .stroke(egui::Stroke::new(1.0, egui::Color32::from_rgb(82, 82, 88)))
                 .inner_margin(egui::Margin::symmetric(18, 14)),
         )
         .show(context, |ui| {
-            let mut light_vis = egui::Visuals::light();
-            light_vis.override_text_color = Some(egui::Color32::from_rgb(20, 20, 22));
-            ui.set_visuals(light_vis);
-
             ui.label(
                 egui::RichText::new(
                     "Are you sure you want to delete selected downloads from IDM list of downloads?",
                 )
                 .size(12.5)
-                .color(egui::Color32::from_rgb(20, 20, 22)),
+                .color(egui::Color32::from_rgb(235, 235, 240)),
             );
             ui.add_space(12.0);
             ui.horizontal(|ui| {
@@ -5779,7 +5775,7 @@ fn draw_forget_download_dialog(app: &mut RajaUi, context: &egui::Context) {
                         "Delete completely downloaded files from your hard disk as well. Be careful !",
                     )
                     .size(12.2)
-                    .color(egui::Color32::from_rgb(20, 20, 22)),
+                    .color(egui::Color32::from_rgb(232, 232, 236)),
                 );
             });
             ui.add_space(4.0);
@@ -5789,7 +5785,7 @@ fn draw_forget_download_dialog(app: &mut RajaUi, context: &egui::Context) {
                     &mut app.dont_show_delete_confirm_again,
                     egui::RichText::new("Don't show this dialog again")
                         .size(12.2)
-                        .color(egui::Color32::from_rgb(20, 20, 22)),
+                        .color(egui::Color32::from_rgb(232, 232, 236)),
                 );
             });
             ui.add_space(14.0);
@@ -5800,13 +5796,13 @@ fn draw_forget_download_dialog(app: &mut RajaUi, context: &egui::Context) {
                         egui::Button::new(
                             egui::RichText::new("Yes")
                                 .size(12.5)
-                                .color(egui::Color32::from_rgb(15, 15, 18)),
+                                .color(egui::Color32::WHITE),
                         )
                         .min_size(egui::vec2(86.0, 25.0))
-                        .fill(egui::Color32::WHITE)
+                        .fill(egui::Color32::from_rgb(45, 45, 48))
                         .stroke(egui::Stroke::new(
                             1.5,
-                            egui::Color32::from_rgb(0, 120, 215),
+                            egui::Color32::from_rgb(45, 138, 225),
                         )),
                     )
                     .clicked();
@@ -5816,13 +5812,13 @@ fn draw_forget_download_dialog(app: &mut RajaUi, context: &egui::Context) {
                         egui::Button::new(
                             egui::RichText::new("No")
                                 .size(12.5)
-                                .color(egui::Color32::from_rgb(15, 15, 18)),
+                                .color(egui::Color32::from_rgb(235, 235, 240)),
                         )
                         .min_size(egui::vec2(86.0, 25.0))
-                        .fill(egui::Color32::WHITE)
+                        .fill(egui::Color32::from_rgb(43, 43, 46))
                         .stroke(egui::Stroke::new(
                             1.0,
-                            egui::Color32::from_rgb(195, 195, 200),
+                            egui::Color32::from_rgb(135, 135, 140),
                         )),
                     )
                     .clicked();
@@ -6033,14 +6029,7 @@ fn draw_etched_separator(ui: &mut egui::Ui) {
     let y = rect.center().y;
     ui.painter().line_segment(
         [egui::pos2(rect.left(), y), egui::pos2(rect.right(), y)],
-        egui::Stroke::new(1.0, egui::Color32::from_rgb(175, 175, 178)),
-    );
-    ui.painter().line_segment(
-        [
-            egui::pos2(rect.left(), y + 1.0),
-            egui::pos2(rect.right(), y + 1.0),
-        ],
-        egui::Stroke::new(1.0, egui::Color32::WHITE),
+        egui::Stroke::new(1.0, egui::Color32::from_rgb(90, 90, 96)),
     );
 }
 
@@ -6070,25 +6059,25 @@ fn draw_properties_dialog(app: &mut RajaUi, context: &egui::Context) {
         .default_width(516.0)
         .frame(
             egui::Frame::new()
-                .fill(egui::Color32::from_rgb(240, 240, 240))
-                .stroke(egui::Stroke::new(
-                    1.0,
-                    egui::Color32::from_rgb(145, 145, 150),
-                ))
+                .fill(egui::Color32::from_rgb(35, 35, 38))
+                .stroke(egui::Stroke::new(1.0, egui::Color32::from_rgb(82, 82, 88)))
                 .inner_margin(egui::Margin::symmetric(12, 10)),
         )
         .show(context, |ui| {
-            let mut light_vis = egui::Visuals::light();
-            light_vis.override_text_color = Some(egui::Color32::from_rgb(15, 15, 18));
-            light_vis.extreme_bg_color = egui::Color32::WHITE;
-            light_vis.widgets.inactive.bg_fill = egui::Color32::from_rgb(248, 248, 250);
-            light_vis.widgets.inactive.bg_stroke =
-                egui::Stroke::new(1.0, egui::Color32::from_rgb(170, 170, 175));
-            light_vis.widgets.hovered.bg_fill = egui::Color32::from_rgb(232, 241, 252);
-            light_vis.widgets.hovered.bg_stroke =
-                egui::Stroke::new(1.0, egui::Color32::from_rgb(0, 120, 215));
-            ui.set_visuals(light_vis);
+            let mut field_visuals = ui.visuals().clone();
+            field_visuals.extreme_bg_color = egui::Color32::from_rgb(43, 43, 46);
+            field_visuals.widgets.inactive.bg_fill = egui::Color32::from_rgb(43, 43, 46);
+            field_visuals.widgets.inactive.bg_stroke =
+                egui::Stroke::new(1.0, egui::Color32::from_rgb(135, 135, 140));
+            field_visuals.widgets.hovered.bg_fill = egui::Color32::from_rgb(48, 48, 52);
+            field_visuals.widgets.hovered.bg_stroke =
+                egui::Stroke::new(1.2, egui::Color32::from_rgb(200, 200, 205));
+            field_visuals.widgets.active.bg_fill = egui::Color32::from_rgb(43, 43, 46);
+            field_visuals.widgets.active.bg_stroke =
+                egui::Stroke::new(1.4, egui::Color32::from_rgb(45, 138, 225));
+            ui.set_visuals(field_visuals);
 
+            let text_col = egui::Color32::from_rgb(235, 235, 240);
             ui.set_width(508.0);
             ui.spacing_mut().item_spacing = egui::vec2(6.0, 6.0);
             let label_col_w = 88.0;
@@ -6112,7 +6101,7 @@ fn draw_properties_dialog(app: &mut RajaUi, context: &egui::Context) {
                 ui.label(
                     egui::RichText::new(&download.file_name)
                         .size(12.5)
-                        .color(egui::Color32::from_rgb(15, 15, 18)),
+                        .color(text_col),
                 );
             });
 
@@ -6129,10 +6118,10 @@ fn draw_properties_dialog(app: &mut RajaUi, context: &egui::Context) {
                     egui::vec2(label_col_w, 20.0),
                     egui::Layout::left_to_right(egui::Align::Center),
                     |ui| {
-                        ui.label(egui::RichText::new("Type:").size(12.5));
+                        ui.label(egui::RichText::new("Type:").size(12.5).color(text_col));
                     },
                 );
-                ui.label(egui::RichText::new(type_str).size(12.5));
+                ui.label(egui::RichText::new(type_str).size(12.5).color(text_col));
             });
 
             // 3. Status Row
@@ -6141,10 +6130,14 @@ fn draw_properties_dialog(app: &mut RajaUi, context: &egui::Context) {
                     egui::vec2(label_col_w, 20.0),
                     egui::Layout::left_to_right(egui::Align::Center),
                     |ui| {
-                        ui.label(egui::RichText::new("Status:").size(12.5));
+                        ui.label(egui::RichText::new("Status:").size(12.5).color(text_col));
                     },
                 );
-                ui.label(egui::RichText::new(status_label(&download.status)).size(12.5));
+                ui.label(
+                    egui::RichText::new(status_label(&download.status))
+                        .size(12.5)
+                        .color(text_col),
+                );
             });
 
             // 4. Size Row
@@ -6154,10 +6147,10 @@ fn draw_properties_dialog(app: &mut RajaUi, context: &egui::Context) {
                     egui::vec2(label_col_w, 20.0),
                     egui::Layout::left_to_right(egui::Align::Center),
                     |ui| {
-                        ui.label(egui::RichText::new("Size:").size(12.5));
+                        ui.label(egui::RichText::new("Size:").size(12.5).color(text_col));
                     },
                 );
-                ui.label(egui::RichText::new(size_str).size(12.5));
+                ui.label(egui::RichText::new(size_str).size(12.5).color(text_col));
             });
 
             // 5. Save To Row + [ Move ] button
@@ -6166,7 +6159,7 @@ fn draw_properties_dialog(app: &mut RajaUi, context: &egui::Context) {
                     egui::vec2(label_col_w, 23.0),
                     egui::Layout::left_to_right(egui::Align::Center),
                     |ui| {
-                        ui.label(egui::RichText::new("Save To:").size(12.5));
+                        ui.label(egui::RichText::new("Save To:").size(12.5).color(text_col));
                     },
                 );
                 let save_input_w = 322.0;
@@ -6177,8 +6170,13 @@ fn draw_properties_dialog(app: &mut RajaUi, context: &egui::Context) {
                 if ui
                     .add_enabled(
                         download.status != "active",
-                        egui::Button::new(egui::RichText::new("Move").size(12.0))
-                            .min_size(egui::vec2(82.0, 23.0)),
+                        egui::Button::new(egui::RichText::new("Move").size(12.0).color(text_col))
+                            .min_size(egui::vec2(82.0, 23.0))
+                            .fill(egui::Color32::from_rgb(45, 45, 48))
+                            .stroke(egui::Stroke::new(
+                                1.0,
+                                egui::Color32::from_rgb(135, 135, 140),
+                            )),
                     )
                     .clicked()
                 {
@@ -6192,7 +6190,7 @@ fn draw_properties_dialog(app: &mut RajaUi, context: &egui::Context) {
                     egui::vec2(label_col_w, 23.0),
                     egui::Layout::left_to_right(egui::Align::Center),
                     |ui| {
-                        ui.label(egui::RichText::new("Address:").size(12.5));
+                        ui.label(egui::RichText::new("Address:").size(12.5).color(text_col));
                     },
                 );
                 ui.add_sized(
@@ -6207,7 +6205,11 @@ fn draw_properties_dialog(app: &mut RajaUi, context: &egui::Context) {
                     egui::vec2(label_col_w, 23.0),
                     egui::Layout::left_to_right(egui::Align::Center),
                     |ui| {
-                        ui.label(egui::RichText::new("Description:").size(12.5));
+                        ui.label(
+                            egui::RichText::new("Description:")
+                                .size(12.5)
+                                .color(text_col),
+                        );
                     },
                 );
                 ui.add_sized(
@@ -6220,83 +6222,96 @@ fn draw_properties_dialog(app: &mut RajaUi, context: &egui::Context) {
 
             // 8. Web page section
             ui.label(
-                egui::RichText::new("The web page from which this file was obtained:").size(12.5),
+                egui::RichText::new("The web page from which this file was obtained:")
+                    .size(12.5)
+                    .color(text_col),
             );
             let web_page_str = if download.download_kind == "video" {
                 download.source_url.as_str()
             } else {
                 "Unknown"
             };
-            ui.label(egui::RichText::new(web_page_str).size(12.5));
+            ui.label(
+                egui::RichText::new(web_page_str)
+                    .size(12.5)
+                    .color(egui::Color32::from_rgb(205, 205, 212)),
+            );
 
             draw_etched_separator(ui);
 
             // 9. Referer, Login, Password rows
-            {
-                let mut sub_vis = ui.visuals().clone();
-                sub_vis.extreme_bg_color = egui::Color32::from_rgb(235, 235, 237);
-                ui.set_visuals(sub_vis);
+            ui.horizontal(|ui| {
+                ui.allocate_ui_with_layout(
+                    egui::vec2(label_col_w, 23.0),
+                    egui::Layout::left_to_right(egui::Align::Center),
+                    |ui| {
+                        ui.label(egui::RichText::new("Referer:").size(12.5).color(text_col));
+                    },
+                );
+                ui.add_sized(
+                    [410.0, 22.0],
+                    egui::TextEdit::singleline(&mut app.prop_referer),
+                );
+            });
 
-                ui.horizontal(|ui| {
-                    ui.allocate_ui_with_layout(
-                        egui::vec2(label_col_w, 23.0),
-                        egui::Layout::left_to_right(egui::Align::Center),
-                        |ui| {
-                            ui.label(egui::RichText::new("Referer:").size(12.5));
-                        },
-                    );
-                    ui.add_sized(
-                        [410.0, 22.0],
-                        egui::TextEdit::singleline(&mut app.prop_referer),
-                    );
-                });
+            ui.horizontal(|ui| {
+                ui.allocate_ui_with_layout(
+                    egui::vec2(label_col_w + 38.0, 23.0),
+                    egui::Layout::right_to_left(egui::Align::Center),
+                    |ui| {
+                        ui.add_space(6.0);
+                        ui.label(egui::RichText::new("Login").size(12.5).color(text_col));
+                    },
+                );
+                ui.add_sized(
+                    [204.0, 22.0],
+                    egui::TextEdit::singleline(&mut app.prop_login),
+                );
+            });
 
-                ui.horizontal(|ui| {
-                    ui.allocate_ui_with_layout(
-                        egui::vec2(label_col_w + 38.0, 23.0),
-                        egui::Layout::right_to_left(egui::Align::Center),
-                        |ui| {
-                            ui.add_space(6.0);
-                            ui.label(egui::RichText::new("Login").size(12.5));
-                        },
-                    );
-                    ui.add_sized(
-                        [204.0, 22.0],
-                        egui::TextEdit::singleline(&mut app.prop_login),
-                    );
-                });
-
-                ui.horizontal(|ui| {
-                    ui.allocate_ui_with_layout(
-                        egui::vec2(label_col_w + 38.0, 23.0),
-                        egui::Layout::right_to_left(egui::Align::Center),
-                        |ui| {
-                            ui.add_space(6.0);
-                            ui.label(egui::RichText::new("Password").size(12.5));
-                        },
-                    );
-                    ui.add_sized(
-                        [204.0, 22.0],
-                        egui::TextEdit::singleline(&mut app.prop_password).password(true),
-                    );
-                });
-            }
+            ui.horizontal(|ui| {
+                ui.allocate_ui_with_layout(
+                    egui::vec2(label_col_w + 38.0, 23.0),
+                    egui::Layout::right_to_left(egui::Align::Center),
+                    |ui| {
+                        ui.add_space(6.0);
+                        ui.label(egui::RichText::new("Password").size(12.5).color(text_col));
+                    },
+                );
+                ui.add_sized(
+                    [204.0, 22.0],
+                    egui::TextEdit::singleline(&mut app.prop_password).password(true),
+                );
+            });
 
             ui.add_space(8.0);
 
             // 10. Bottom Buttons: [ Open ] and [ OK ]
             ui.horizontal(|ui| {
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    let ok_btn = egui::Button::new(egui::RichText::new("OK").size(12.5))
-                        .fill(egui::Color32::from_rgb(245, 248, 255))
-                        .stroke(egui::Stroke::new(1.5, egui::Color32::from_rgb(0, 120, 215)))
-                        .min_size(egui::vec2(82.0, 25.0));
+                    let ok_btn = egui::Button::new(
+                        egui::RichText::new("OK")
+                            .size(12.5)
+                            .color(egui::Color32::WHITE),
+                    )
+                    .fill(egui::Color32::from_rgb(45, 45, 48))
+                    .stroke(egui::Stroke::new(
+                        1.5,
+                        egui::Color32::from_rgb(45, 138, 225),
+                    ))
+                    .min_size(egui::vec2(82.0, 25.0));
                     if ui.add(ok_btn).clicked() {
                         trigger_ok = true;
                     }
                     ui.add_space(68.0);
-                    let open_btn = egui::Button::new(egui::RichText::new("Open").size(12.5))
-                        .min_size(egui::vec2(82.0, 25.0));
+                    let open_btn =
+                        egui::Button::new(egui::RichText::new("Open").size(12.5).color(text_col))
+                            .fill(egui::Color32::from_rgb(43, 43, 46))
+                            .stroke(egui::Stroke::new(
+                                1.0,
+                                egui::Color32::from_rgb(135, 135, 140),
+                            ))
+                            .min_size(egui::vec2(82.0, 25.0));
                     if ui.add(open_btn).clicked() {
                         trigger_open = true;
                     }

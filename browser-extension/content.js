@@ -320,15 +320,47 @@
     return list;
   }
 
+  // Sends a message to the extension service worker without ever leaving the
+  // caller hanging: handles an invalidated extension context (after the
+  // extension was updated/reloaded) and a missing response via a timeout.
+  function sendRuntimeMessage(message, callback, timeoutMs = 20000) {
+    let finished = false;
+    const finish = (result) => {
+      if (finished) return;
+      finished = true;
+      window.clearTimeout(timer);
+      callback(result);
+    };
+    const timer = window.setTimeout(
+      () => finish({ ok: false, message: "RAJA did not respond. Refresh the page." }),
+      timeoutMs
+    );
+    try {
+      if (!chrome.runtime?.id) {
+        throw new Error("Extension context invalidated");
+      }
+      chrome.runtime.sendMessage(message, (response) => {
+        const error = chrome.runtime.lastError;
+        if (error) {
+          finish({ ok: false, message: error.message || "Could not reach RAJA." });
+          return;
+        }
+        finish(response || { ok: false, message: "RAJA did not respond." });
+      });
+    } catch (_error) {
+      finish({ ok: false, message: "RAJA extension updated - refresh this page (F5)." });
+    }
+  }
+
   function prefetchFormatsInBackground(url) {
     if (!url || prefetchedUrl === url || urlFormatsCache.has(url)) {
       return;
     }
     prefetchedUrl = url;
-    chrome.runtime.sendMessage(
+    sendRuntimeMessage(
       { type: "raja-list-video-formats", url },
       (response) => {
-        if (chrome.runtime.lastError || !response?.ok || !Array.isArray(response.heights)) {
+        if (!response?.ok || !Array.isArray(response.heights)) {
           return;
         }
         const activeVideo = getActiveVideo();
@@ -357,7 +389,7 @@
         metaSpan.textContent = `Opening in RAJA...`;
       }
     }
-    chrome.runtime.sendMessage(
+    sendRuntimeMessage(
       {
         type: "raja-download-page",
         url,
@@ -368,7 +400,7 @@
         fileSize
       },
       (result) => {
-        const sendFailed = chrome.runtime.lastError || !result?.ok;
+        const sendFailed = !result?.ok;
         if (rowEl) {
           const metaSpan = rowEl.querySelector(".opt-meta");
           if (metaSpan) {
@@ -386,7 +418,7 @@
             if (titleSpan) titleSpan.textContent = originalTitle;
             if (metaSpan) metaSpan.textContent = originalMeta;
           }
-        }, 450);
+        }, sendFailed ? 4000 : 450);
       }
     );
   }

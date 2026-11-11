@@ -222,7 +222,10 @@ fn start_raja_ui() -> io::Result<()> {
         } else {
             "raja-ui"
         });
+    // Start hidden: RAJA then shows only the "Download File Info" box for the
+    // queued browser request instead of the whole main window.
     Command::new(ui_executable)
+        .arg("--background")
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null())

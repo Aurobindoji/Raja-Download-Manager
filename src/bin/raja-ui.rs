@@ -120,6 +120,16 @@ struct TorrentFileEntry {
     priority: TorrentFilePriority,
 }
 
+/// Dialog shown alone (without the main window) after a browser request.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum CompactView {
+    AddDownload,
+    Progress,
+}
+
+/// Initial size of the compact "Download File Info" window (auto-fitted later).
+const COMPACT_ADD_SIZE: egui::Vec2 = egui::vec2(640.0, 300.0);
+
 struct RajaUi {
     url: String,
     output: String,
@@ -147,6 +157,16 @@ struct RajaUi {
     category: DownloadCategory,
     selected_download: Option<i64>,
     show_add_dialog: bool,
+    /// Whether the full main window is currently shown to the user. Shared with
+    /// the browser-inbox watcher thread so it knows whether to pop up a
+    /// compact dialog-only window instead of the whole main window.
+    main_visible: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    /// When set, the root window is temporarily shrunk to show only a single
+    /// dialog (IDM-style "Download File Info" / progress window).
+    compact_view: Option<CompactView>,
+    compact_saved_size: Option<egui::Vec2>,
+    compact_title: String,
+    compact_size: egui::Vec2,
     show_torrent_dialog: bool,
     show_active_progress_dialog: bool,
     active_progress_download_id: Option<i64>,
@@ -456,6 +476,11 @@ impl RajaUi {
             schedule_after_minutes: 15,
             scheduled_queue_at: None,
             inbox_poll_at: Instant::now() - Duration::from_secs(1),
+            main_visible: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(true)),
+            compact_view: None,
+            compact_saved_size: None,
+            compact_title: String::new(),
+            compact_size: egui::Vec2::ZERO,
             #[cfg(windows)]
             tray,
             #[cfg(windows)]
@@ -1304,6 +1329,19 @@ impl RajaUi {
                 }
                 self.load_torrent_metadata(&url);
                 self.show_torrent_dialog = true;
+                if self.compact_view.is_some() {
+                    self.leave_compact(context, true);
+                } else if !self.is_main_visible() {
+                    // Undo the watcher's pre-shrink: torrents use the full window.
+                    context.send_viewport_cmd(egui::ViewportCommand::Title("Raja".to_owned()));
+                    context.send_viewport_cmd(egui::ViewportCommand::MinInnerSize(egui::vec2(
+                        760.0, 520.0,
+                    )));
+                    context.send_viewport_cmd(egui::ViewportCommand::InnerSize(egui::vec2(
+                        980.0, 700.0,
+                    )));
+                }
+                self.set_main_visible(true);
                 context.send_viewport_cmd(egui::ViewportCommand::Visible(true));
                 context.send_viewport_cmd(egui::ViewportCommand::Minimized(false));
                 context.send_viewport_cmd(egui::ViewportCommand::Focus);
@@ -1352,9 +1390,140 @@ impl RajaUi {
                 }
             });
             self.show_add_dialog = true;
+            if self.compact_view.is_some() || !self.is_main_visible() {
+                // IDM-style: show only the "Download File Info" box, not the main window.
+                self.enter_compact(context, CompactView::AddDownload);
+            } else {
+                context.send_viewport_cmd(egui::ViewportCommand::Visible(true));
+                context.send_viewport_cmd(egui::ViewportCommand::Minimized(false));
+                context.send_viewport_cmd(egui::ViewportCommand::Focus);
+            }
+        }
+    }
+
+    fn is_main_visible(&self) -> bool {
+        self.main_visible.load(std::sync::atomic::Ordering::SeqCst)
+    }
+
+    fn set_main_visible(&self, visible: bool) {
+        self.main_visible
+            .store(visible, std::sync::atomic::Ordering::SeqCst);
+    }
+
+    /// Turns the (hidden) root window into a small dialog-only window.
+    fn enter_compact(&mut self, context: &egui::Context, view: CompactView) {
+        if self.compact_view.is_none() {
+            self.compact_saved_size = context.input(|i| i.viewport().inner_rect.map(|r| r.size()));
+            self.compact_size = COMPACT_ADD_SIZE;
+            context.send_viewport_cmd(egui::ViewportCommand::MinInnerSize(egui::vec2(
+                200.0, 120.0,
+            )));
+            context.send_viewport_cmd(egui::ViewportCommand::InnerSize(self.compact_size));
+            if let Some(monitor) = context.input(|i| i.viewport().monitor_size) {
+                let pos = ((monitor - self.compact_size) * 0.5).max(egui::Vec2::ZERO);
+                context.send_viewport_cmd(egui::ViewportCommand::OuterPosition(pos.to_pos2()));
+            }
+        }
+        self.compact_view = Some(view);
+        let title = match view {
+            CompactView::AddDownload => "Download File Info".to_owned(),
+            CompactView::Progress => "Download progress".to_owned(),
+        };
+        self.set_compact_title(context, title);
+        context.send_viewport_cmd(egui::ViewportCommand::Visible(true));
+        context.send_viewport_cmd(egui::ViewportCommand::Minimized(false));
+        context.send_viewport_cmd(egui::ViewportCommand::Focus);
+    }
+
+    fn set_compact_title(&mut self, context: &egui::Context, title: String) {
+        if self.compact_title != title {
+            context.send_viewport_cmd(egui::ViewportCommand::Title(title.clone()));
+            self.compact_title = title;
+        }
+    }
+
+    /// Restores the root window to the full main window. When `show_main` is
+    /// false the window is hidden again (back to the system tray).
+    fn leave_compact(&mut self, context: &egui::Context, show_main: bool) {
+        if self.compact_view.take().is_none() {
+            return;
+        }
+        if !show_main {
+            context.send_viewport_cmd(egui::ViewportCommand::Visible(false));
+        }
+        context.send_viewport_cmd(egui::ViewportCommand::Title("Raja".to_owned()));
+        self.compact_title.clear();
+        context.send_viewport_cmd(egui::ViewportCommand::MinInnerSize(egui::vec2(
+            760.0, 520.0,
+        )));
+        let size = self
+            .compact_saved_size
+            .take()
+            .filter(|s| s.x >= 760.0 && s.y >= 520.0)
+            .unwrap_or(egui::vec2(980.0, 700.0));
+        context.send_viewport_cmd(egui::ViewportCommand::InnerSize(size));
+        if let Some(monitor) = context.input(|i| i.viewport().monitor_size) {
+            let pos = ((monitor - size) * 0.5).max(egui::Vec2::ZERO);
+            context.send_viewport_cmd(egui::ViewportCommand::OuterPosition(pos.to_pos2()));
+        }
+        self.set_main_visible(show_main);
+        if show_main {
             context.send_viewport_cmd(egui::ViewportCommand::Visible(true));
-            context.send_viewport_cmd(egui::ViewportCommand::Minimized(false));
             context.send_viewport_cmd(egui::ViewportCommand::Focus);
+        }
+    }
+
+    /// Draws the compact dialog-only window. Returns after handling transitions
+    /// between the add dialog, the progress window and leaving compact mode.
+    fn draw_compact(&mut self, ui: &mut egui::Ui, context: &egui::Context) {
+        if context.input(|i| i.viewport().close_requested()) {
+            context.send_viewport_cmd(egui::ViewportCommand::CancelClose);
+            match self.compact_view {
+                Some(CompactView::AddDownload) => self.show_add_dialog = false,
+                Some(CompactView::Progress) => self.show_active_progress_dialog = false,
+                None => {}
+            }
+        }
+
+        egui::CentralPanel::default()
+            .frame(egui::Frame::new().fill(egui::Color32::from_rgb(35, 35, 38)))
+            .show(ui, |_ui| {});
+
+        let rect = match self.compact_view {
+            Some(CompactView::AddDownload) if self.show_add_dialog => {
+                draw_add_download_dialog(self, context)
+            }
+            Some(CompactView::Progress) if self.show_active_progress_dialog => {
+                draw_active_download_progress_dialog(self, context)
+            }
+            _ => None,
+        };
+
+        // Fit the native window to the dialog contents.
+        if let Some(rect) = rect {
+            let wanted = egui::vec2(rect.width().ceil(), rect.height().ceil());
+            if (wanted - self.compact_size).abs().max_elem() > 1.0 {
+                self.compact_size = wanted;
+                context.send_viewport_cmd(egui::ViewportCommand::InnerSize(wanted));
+            }
+        }
+
+        // Transitions.
+        match self.compact_view {
+            Some(CompactView::AddDownload) if !self.show_add_dialog => {
+                if self.show_active_progress_dialog {
+                    self.compact_view = Some(CompactView::Progress);
+                    self.set_compact_title(context, "Download progress".to_owned());
+                } else if self.show_torrent_dialog {
+                    self.leave_compact(context, true);
+                } else {
+                    self.leave_compact(context, false);
+                }
+            }
+            Some(CompactView::Progress) if !self.show_active_progress_dialog => {
+                self.leave_compact(context, false);
+            }
+            _ => {}
         }
     }
 
@@ -1363,6 +1532,10 @@ impl RajaUi {
         while let Ok(command) = self.tray.try_recv() {
             match command {
                 tray::TrayCommand::Show => {
+                    if self.compact_view.is_some() {
+                        self.leave_compact(context, true);
+                    }
+                    self.set_main_visible(true);
                     context.send_viewport_cmd(egui::ViewportCommand::Visible(true));
                     context.send_viewport_cmd(egui::ViewportCommand::Focus);
                 }
@@ -2042,11 +2215,13 @@ impl eframe::App for RajaUi {
         if self.last_refresh.elapsed() >= refresh_interval {
             self.refresh_downloads();
         }
-        if context.input(|input| input.viewport().close_requested()) {
+        if self.compact_view.is_none() && context.input(|input| input.viewport().close_requested())
+        {
             #[cfg(windows)]
             if !self.exit_requested {
                 context.send_viewport_cmd(egui::ViewportCommand::CancelClose);
                 context.send_viewport_cmd(egui::ViewportCommand::Visible(false));
+                self.set_main_visible(false);
                 self.status = "RAJA is still running in the system tray.".to_owned();
             }
         }
@@ -2059,6 +2234,16 @@ impl eframe::App for RajaUi {
         visuals.widgets.noninteractive.bg_stroke =
             egui::Stroke::new(1.0, egui::Color32::from_rgb(85, 85, 88));
         context.set_visuals(visuals);
+
+        #[cfg(windows)]
+        let exiting = self.exit_requested;
+        #[cfg(not(windows))]
+        let exiting = false;
+        if self.compact_view.is_some() && !exiting {
+            self.draw_compact(ui, &context);
+            context.request_repaint_after(Duration::from_millis(250));
+            return;
+        }
 
         draw_menu_bar(self, ui);
         draw_toolbar(self, ui);
@@ -4157,22 +4342,34 @@ fn table_date_label(timestamp: Option<i64>) -> String {
         })
 }
 
-fn draw_add_download_dialog(app: &mut RajaUi, context: &egui::Context) {
+fn draw_add_download_dialog(app: &mut RajaUi, context: &egui::Context) -> Option<egui::Rect> {
     let mut open = true;
     let mut start_download = false;
     let mut download_later = false;
+    let compact = app.compact_view.is_some();
 
-    egui::Window::new("Download File Info")
+    let window = egui::Window::new("Download File Info")
         .open(&mut open)
         .collapsible(false)
         .resizable(false)
         .default_width(620.0)
+        .title_bar(!compact)
         .frame(
             egui::Frame::new()
                 .fill(egui::Color32::from_rgb(35, 35, 38))
-                .stroke(egui::Stroke::new(1.0, egui::Color32::from_rgb(78, 78, 84)))
+                .stroke(if compact {
+                    egui::Stroke::NONE
+                } else {
+                    egui::Stroke::new(1.0, egui::Color32::from_rgb(78, 78, 84))
+                })
                 .inner_margin(egui::Margin::symmetric(14, 12)),
-        )
+        );
+    let window = if compact {
+        window.anchor(egui::Align2::LEFT_TOP, egui::Vec2::ZERO)
+    } else {
+        window
+    };
+    let window_rect = window
         .show(context, |ui| {
             let mut field_visuals = ui.visuals().clone();
             field_visuals.extreme_bg_color = egui::Color32::from_rgb(43, 43, 46);
@@ -4539,7 +4736,8 @@ fn draw_add_download_dialog(app: &mut RajaUi, context: &egui::Context) {
                     app.show_add_dialog = false;
                 }
             });
-        });
+        })
+        .map(|response| response.response.rect);
 
     if !open {
         app.show_add_dialog = false;
@@ -4547,7 +4745,7 @@ fn draw_add_download_dialog(app: &mut RajaUi, context: &egui::Context) {
     if download_later {
         app.enqueue_download_later();
         app.show_add_dialog = false;
-        return;
+        return window_rect;
     }
     if start_download {
         let trimmed_url = app.url.trim().to_owned();
@@ -4567,14 +4765,14 @@ fn draw_add_download_dialog(app: &mut RajaUi, context: &egui::Context) {
             app.load_torrent_metadata(&trimmed_url);
             app.show_add_dialog = false;
             app.show_torrent_dialog = true;
-            return;
+            return window_rect;
         }
         if app.video_page_download || is_likely_video_page_url(&trimmed_url) {
             let output = app.output.trim().to_owned();
             let max_h = app.add_dialog_max_height;
             app.start_video_extraction_with_max_height(&trimmed_url, &output, max_h);
             app.show_add_dialog = false;
-            return;
+            return window_rect;
         }
         let mut args = vec![
             "download".to_owned(),
@@ -4590,6 +4788,7 @@ fn draw_add_download_dialog(app: &mut RajaUi, context: &egui::Context) {
         app.run_core(&args);
         app.show_add_dialog = false;
     }
+    window_rect
 }
 
 fn draw_torrent_dialog(app: &mut RajaUi, context: &egui::Context) {
@@ -5025,7 +5224,10 @@ fn format_idm_time_left(
     }
 }
 
-fn draw_active_download_progress_dialog(app: &mut RajaUi, context: &egui::Context) {
+fn draw_active_download_progress_dialog(
+    app: &mut RajaUi,
+    context: &egui::Context,
+) -> Option<egui::Rect> {
     let target_id = app
         .active_progress_download_id
         .or_else(|| {
@@ -5043,7 +5245,7 @@ fn draw_active_download_progress_dialog(app: &mut RajaUi, context: &egui::Contex
         if app.pending_progress_url.is_none() {
             app.show_active_progress_dialog = false;
         }
-        return;
+        return None;
     };
     app.active_progress_download_id = Some(download.id);
 
@@ -5084,18 +5286,33 @@ fn draw_active_download_progress_dialog(app: &mut RajaUi, context: &egui::Contex
 
     #[allow(deprecated)]
     let win_id = egui::Id::new("idm-active-download-progress-window");
-    egui::Window::new(window_title)
+    let compact = app.compact_view.is_some();
+    if compact {
+        app.set_compact_title(context, window_title.clone());
+    }
+    let window = egui::Window::new(window_title)
         .id(win_id)
         .open(&mut open)
         .collapsible(false)
         .resizable(false)
         .default_width(552.0)
+        .title_bar(!compact)
         .frame(
             egui::Frame::new()
                 .fill(egui::Color32::from_rgb(35, 35, 38))
-                .stroke(egui::Stroke::new(1.0, egui::Color32::from_rgb(82, 82, 88)))
+                .stroke(if compact {
+                    egui::Stroke::NONE
+                } else {
+                    egui::Stroke::new(1.0, egui::Color32::from_rgb(82, 82, 88))
+                })
                 .inner_margin(egui::Margin::symmetric(12, 10)),
-        )
+        );
+    let window = if compact {
+        window.anchor(egui::Align2::LEFT_TOP, egui::Vec2::ZERO)
+    } else {
+        window
+    };
+    let window_rect = window
         .show(context, |ui| {
             ui.set_width(536.0);
             ui.spacing_mut().item_spacing = egui::vec2(0.0, 0.0);
@@ -5707,7 +5924,8 @@ fn draw_active_download_progress_dialog(app: &mut RajaUi, context: &egui::Contex
                         }
                     });
             }
-        });
+        })
+        .map(|response| response.response.rect);
 
     if !open {
         app.show_active_progress_dialog = false;
@@ -5730,6 +5948,7 @@ fn draw_active_download_progress_dialog(app: &mut RajaUi, context: &egui::Contex
         }
         app.show_active_progress_dialog = false;
     }
+    window_rect
 }
 
 fn draw_forget_download_dialog(app: &mut RajaUi, context: &egui::Context) {
@@ -8058,6 +8277,8 @@ fn main() -> eframe::Result<()> {
     let inbox_watch_dir = PathBuf::from(&app.database)
         .parent()
         .map(|p| p.join("browser-inbox"));
+    app.set_main_visible(!background);
+    let main_visible = app.main_visible.clone();
     eframe::run_native(
         "Raja",
         options,
@@ -8074,6 +8295,19 @@ fn main() -> eframe::Result<()> {
                                     .any(|e| e.path().extension().is_some_and(|ext| ext == "json"))
                             });
                         if has_request {
+                            if !main_visible.load(std::sync::atomic::Ordering::SeqCst) {
+                                // Pre-shrink so the full main window never flashes;
+                                // the UI thread then switches into compact mode.
+                                ctx.send_viewport_cmd(egui::ViewportCommand::MinInnerSize(
+                                    egui::vec2(200.0, 120.0),
+                                ));
+                                ctx.send_viewport_cmd(egui::ViewportCommand::InnerSize(
+                                    COMPACT_ADD_SIZE,
+                                ));
+                                ctx.send_viewport_cmd(egui::ViewportCommand::Title(
+                                    "Download File Info".to_owned(),
+                                ));
+                            }
                             ctx.send_viewport_cmd(egui::ViewportCommand::Visible(true));
                             ctx.send_viewport_cmd(egui::ViewportCommand::Minimized(false));
                             ctx.send_viewport_cmd(egui::ViewportCommand::Focus);

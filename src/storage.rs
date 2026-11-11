@@ -254,6 +254,9 @@ pub struct DownloadSummary {
     pub durable_bytes: u64,
 }
 
+/// `(created_at, last_attempt_at, completed_at)` in Unix seconds.
+pub type DownloadTimes = (i64, Option<i64>, Option<i64>);
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SegmentSummary {
     pub id: i64,
@@ -634,6 +637,19 @@ impl Storage {
             .prepare("SELECT download_id, server_url FROM download_server_urls")?;
         let rows = statement.query_map([], |row| Ok((row.get(0)?, row.get(1)?)))?;
         Ok(rows.collect::<Result<_, _>>()?)
+    }
+
+    /// `(created_at, last_attempt_at, completed_at)` in Unix seconds, used to
+    /// show how long a finished download took and its average speed.
+    pub fn download_times(&self, download_id: i64) -> Result<Option<DownloadTimes>, StorageError> {
+        Ok(self
+            .connection
+            .query_row(
+                "SELECT created_at, last_attempt_at, completed_at FROM downloads WHERE id = ?1",
+                [download_id],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .optional()?)
     }
 
     /// All saved descriptions, by download id.

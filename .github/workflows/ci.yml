@@ -39,7 +39,7 @@ jobs:
           node --check "browser-extension/background.js"
           node --check "browser-extension/content.js"
           $extension = Get-Content "browser-extension/manifest.json" -Raw | ConvertFrom-Json
-          if ($extension.version -ne "0.2.0" -or "nativeMessaging" -notin $extension.permissions) {
+          if ($extension.version -ne "0.3.0" -or "nativeMessaging" -notin $extension.permissions) {
             throw "Browser extension is missing the native-messaging bridge permission."
           }
           $manifest = Get-Content "Cargo.toml" -Raw

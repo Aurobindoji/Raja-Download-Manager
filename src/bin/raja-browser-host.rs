@@ -111,6 +111,13 @@ fn handle_request(
         .get("file_size")
         .and_then(serde_json::Value::as_u64)
         .filter(|&sz| sz > 0);
+    // Name the browser chose (from the server's Content-Disposition) for a
+    // download it handed over; at most 255 characters.
+    let file_name = value
+        .get("file_name")
+        .and_then(serde_json::Value::as_str)
+        .map(str::trim)
+        .filter(|s| !s.is_empty() && s.chars().count() <= 255);
 
     let request = serde_json::json!({
         "url": parsed.as_str(),
@@ -120,6 +127,7 @@ fn handle_request(
         "container": container,
         "description": description,
         "file_size": file_size,
+        "file_name": file_name,
     });
     let bytes = serde_json::to_vec(&request).map_err(|error| error.to_string())?;
     let timestamp = SystemTime::now()

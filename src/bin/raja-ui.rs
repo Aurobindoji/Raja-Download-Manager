@@ -1181,6 +1181,31 @@ impl RajaUi {
         }
     }
 
+    /// Replaces a generic Save As name ("download", or one without an
+    /// extension) with the name the server gave, and files it in the
+    /// matching category folder.
+    fn use_server_file_name(&mut self, name: &str) {
+        let output = PathBuf::from(self.output.trim());
+        let current = output
+            .file_name()
+            .and_then(|current| current.to_str())
+            .unwrap_or("");
+        let generic = current.is_empty()
+            || current.eq_ignore_ascii_case("download")
+            || std::path::Path::new(current).extension().is_none();
+        if !generic || current == name {
+            return;
+        }
+        let category = AddFileCategory::from_filename(name);
+        let directory = category_directory_path(&self.default_download_directory, category);
+        self.add_dialog_category = category;
+        self.add_category_dir = directory.clone();
+        self.output = PathBuf::from(directory)
+            .join(name)
+            .to_string_lossy()
+            .into_owned();
+    }
+
     /// Removes the saved yt-dlp information for this download's page, if any.
     fn forget_saved_video_info(&self, download_id: i64) {
         let Some(url) = self
@@ -1726,7 +1751,14 @@ impl RajaUi {
                 .map(|c| c.to_ascii_lowercase())
                 .filter(|c| matches!(c.as_str(), "mp4" | "mkv" | "webm"))
                 .unwrap_or_else(|| "mp4".to_owned());
-            let file_name = if let Some(raw_title) = title {
+            let browser_file_name = request
+                .get("file_name")
+                .and_then(serde_json::Value::as_str)
+                .map(sanitize_windows_filename)
+                .filter(|name| !name.is_empty() && !is_video);
+            let file_name = if let Some(name) = browser_file_name {
+                name
+            } else if let Some(raw_title) = title {
                 let clean_stem = sanitize_windows_filename(raw_title);
                 format!("{clean_stem}.{ext}")
             } else {
@@ -4843,10 +4875,13 @@ fn draw_add_download_dialog(app: &mut RajaUi, context: &egui::Context) -> Option
         && !is_likely_video_page_url(app.url.trim());
     if plain_file {
         app.add_probe.ensure(app.url.trim());
-        if let Some(result) = app.add_probe.poll()
-            && app.add_dialog_file_size.is_none()
-        {
-            app.add_dialog_file_size = result.size;
+        if let Some(result) = app.add_probe.poll().cloned() {
+            if app.add_dialog_file_size.is_none() {
+                app.add_dialog_file_size = result.size;
+            }
+            if let Some(name) = result.file_name {
+                app.use_server_file_name(&name);
+            }
         }
         if app.add_probe.is_running() {
             context.request_repaint_after(Duration::from_millis(200));
@@ -6028,13 +6063,35 @@ fn draw_active_download_progress_dialog(
                     } else {
                         format_size_3dec(download.durable_bytes)
                     };
-                    let rate_str = format_rate_3dec(rate);
-                    let eta_str = format_time_left(
-                        download.total_size,
-                        download.durable_bytes,
-                        rate,
-                        is_active,
-                    );
+                    // A finished download shows its average speed and how long
+                    // it took instead of the live rate and time left.
+                    let finished = if is_complete {
+                        Storage::open(&app.database)
+                            .ok()
+                            .and_then(|storage| storage.download_times(download.id).ok().flatten())
+                            .and_then(|times| finished_timing(times, download.total_size))
+                    } else {
+                        None
+                    };
+                    let (rate_str, time_label, eta_str) = match finished {
+                        Some(timing) => (
+                            timing
+                                .average_rate
+                                .map_or_else(|| "—".to_owned(), |r| format_rate_3dec(Some(r))),
+                            "Time taken",
+                            timing.label,
+                        ),
+                        None => (
+                            format_rate_3dec(rate),
+                            "Time left",
+                            format_time_left(
+                                download.total_size,
+                                download.durable_bytes,
+                                rate,
+                                is_active,
+                            ),
+                        ),
+                    };
 
                     let font = egui::FontId::proportional(12.5);
                     let label_color = rgb(214, 214, 220);
@@ -6086,12 +6143,12 @@ fn draw_active_download_progress_dialog(
                         ("File size", size_str.as_str()),
                         ("Downloaded", dl_str.as_str()),
                         ("Transfer rate", rate_str.as_str()),
-                        ("Time left", eta_str.as_str()),
+                        (time_label, eta_str.as_str()),
                     ] {
                         row(y, lbl, val, value_x);
                         y += 18.0;
                     }
-                    row(y, "Resume capability", "Yes", left + 200.0);
+                    row(y, "Resume capability", "Yes", left + 132.0);
                 }
                 ProgressDialogTab::SpeedLimiter => {
                     box_ui.add_space(10.0);
@@ -7355,6 +7412,36 @@ fn time_left_label(
     format_duration((remaining_bytes as f64 / rate).ceil() as u64)
 }
 
+/// How a finished download went: time taken and average speed.
+struct FinishedTiming {
+    label: String,
+    average_rate: Option<f64>,
+}
+
+/// From `(created_at, last_attempt_at, completed_at)`. When the download was
+/// resumed, only the last session's time is known, so no average is shown.
+fn finished_timing(
+    (created, last_attempt, completed): (i64, Option<i64>, Option<i64>),
+    total_size: Option<u64>,
+) -> Option<FinishedTiming> {
+    let completed = completed?;
+    let started = last_attempt.unwrap_or(created);
+    let seconds = u64::try_from(completed - started).ok()?;
+    let resumed = last_attempt.is_some_and(|last| last - created > 2);
+    let label = match (seconds, resumed) {
+        (0, _) => "under 1 sec".to_owned(),
+        (_, true) => format!("{} (last session)", format_duration(seconds)),
+        _ => format_duration(seconds),
+    };
+    let average_rate = (!resumed)
+        .then(|| total_size.map(|size| size as f64 / seconds.max(1) as f64))
+        .flatten();
+    Some(FinishedTiming {
+        label,
+        average_rate,
+    })
+}
+
 fn format_duration(seconds: u64) -> String {
     if seconds >= 86_400 {
         format!("{}d {:02}h", seconds / 86_400, seconds / 3_600 % 24)
@@ -7785,6 +7872,8 @@ fn category_directory_path(base_dir: &str, cat: AddFileCategory) -> String {
 struct LinkInfo {
     size: Option<u64>,
     is_web_page: bool,
+    /// Name the server suggests (Content-Disposition), if any.
+    file_name: Option<String>,
 }
 
 /// Checks the link in the add box in the background (size and type), so the
@@ -7866,7 +7955,54 @@ fn probe_link(url: &str) -> Option<LinkInfo> {
         let kind = kind.to_ascii_lowercase();
         kind.starts_with("text/html") || kind.starts_with("application/xhtml")
     });
-    Some(LinkInfo { size, is_web_page })
+    let file_name = text(reqwest::header::CONTENT_DISPOSITION)
+        .and_then(content_disposition_file_name)
+        .map(|name| sanitize_windows_filename(&name))
+        .filter(|name| !name.is_empty());
+    Some(LinkInfo {
+        size,
+        is_web_page,
+        file_name,
+    })
+}
+
+/// `attachment; filename="a b.mkv"` / `filename*=UTF-8''a%20b.mkv` -> name.
+fn content_disposition_file_name(header: &str) -> Option<String> {
+    let mut plain = None;
+    for part in header.split(';').map(str::trim) {
+        let Some((key, value)) = part.split_once('=') else {
+            continue;
+        };
+        let value = value.trim();
+        match key.trim().to_ascii_lowercase().as_str() {
+            "filename*" => {
+                let encoded = value.rsplit_once("''").map_or(value, |(_, rest)| rest);
+                if let Some(decoded) = percent_decode(encoded.trim_matches('"')) {
+                    return Some(decoded);
+                }
+            }
+            "filename" => plain = Some(value.trim_matches('"').to_owned()),
+            _ => {}
+        }
+    }
+    plain.filter(|name| !name.is_empty())
+}
+
+fn percent_decode(text: &str) -> Option<String> {
+    let bytes = text.as_bytes();
+    let mut out = Vec::with_capacity(bytes.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == b'%' && i + 2 < bytes.len() {
+            let hex = std::str::from_utf8(&bytes[i + 1..i + 3]).ok()?;
+            out.push(u8::from_str_radix(hex, 16).ok()?);
+            i += 3;
+        } else {
+            out.push(bytes[i]);
+            i += 1;
+        }
+    }
+    String::from_utf8(out).ok().filter(|name| !name.is_empty())
 }
 
 /// Engine errors as a user can act on them.
@@ -9434,12 +9570,12 @@ fn render_3d_app_icon(size: usize) -> Vec<u8> {
 mod tests {
     use super::{
         DownloadCategory, ProgressSample, VideoStreams, browser_suggested_filename,
-        explain_engine_error, explain_ytdlp_error, format_duration, last_attempt_label,
-        lossy_lines, parse_launch_url, parse_server_url_line, parse_video_error_line,
-        parse_video_output_line, parse_video_progress_line, parse_video_size_line,
-        queueable_download_ids, suggested_filename, time_left_label, transfer_rate_label,
-        use_saved_video_info, video_extraction_arguments, video_extraction_arguments_for_height,
-        video_job_arguments, video_output_template,
+        content_disposition_file_name, explain_engine_error, explain_ytdlp_error, finished_timing,
+        format_duration, last_attempt_label, lossy_lines, parse_launch_url, parse_server_url_line,
+        parse_video_error_line, parse_video_output_line, parse_video_progress_line,
+        parse_video_size_line, queueable_download_ids, suggested_filename, time_left_label,
+        transfer_rate_label, use_saved_video_info, video_extraction_arguments,
+        video_extraction_arguments_for_height, video_job_arguments, video_output_template,
     };
     use raja_core::storage::DownloadSummary;
     use std::ffi::OsString;
@@ -9548,6 +9684,39 @@ mod tests {
             ))
         );
         assert_eq!(parse_server_url_line("RAJA_SERVER_URL:5:NA"), None);
+    }
+
+    #[test]
+    fn reads_file_names_from_content_disposition() {
+        assert_eq!(
+            content_disposition_file_name(
+                r#"attachment; filename="Dexter.S02E01.480p.WEB-DL.mkv""#
+            )
+            .as_deref(),
+            Some("Dexter.S02E01.480p.WEB-DL.mkv")
+        );
+        assert_eq!(
+            content_disposition_file_name(
+                "attachment; filename=\"fallback.bin\"; filename*=UTF-8''r%C3%A9sum%C3%A9.pdf"
+            )
+            .as_deref(),
+            Some("r\u{e9}sum\u{e9}.pdf")
+        );
+        assert_eq!(content_disposition_file_name("inline"), None);
+    }
+
+    #[test]
+    fn finished_downloads_show_time_taken_and_average_speed() {
+        // The Dexter download: 228,659,018 bytes in 24 seconds.
+        let timing = finished_timing((511, Some(511), Some(535)), Some(228_659_018)).unwrap();
+        assert_eq!(timing.label, "24s");
+        let rate = timing.average_rate.unwrap();
+        assert!((rate - 9_527_459.0).abs() < 1.0, "{rate}");
+        // Resumed: only the last session is known, no average.
+        let resumed = finished_timing((100, Some(500), Some(560)), Some(10)).unwrap();
+        assert_eq!(resumed.label, "1m 00s (last session)");
+        assert!(resumed.average_rate.is_none());
+        assert!(finished_timing((1, Some(1), None), Some(10)).is_none());
     }
 
     #[test]

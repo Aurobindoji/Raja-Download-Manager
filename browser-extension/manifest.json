@@ -3,6 +3,12 @@
   "name": "Raja Download Manager",
   "version": "0.2.0",
   "description": "Choose a video quality or send links to the RAJA Download Manager.",
+  "icons": {
+    "16": "icon16.png",
+    "32": "icon32.png",
+    "48": "icon48.png",
+    "128": "icon128.png"
+  },
   "permissions": ["contextMenus", "nativeMessaging"],
   "host_permissions": ["http://*/*", "https://*/*"],
   "background": {
@@ -16,6 +22,12 @@
     }
   ],
   "action": {
-    "default_title": "Raja Download Manager"
+    "default_title": "Raja Download Manager",
+    "default_icon": {
+      "16": "icon16.png",
+      "32": "icon32.png",
+      "48": "icon48.png",
+      "128": "icon128.png"
+    }
   }
 }

@@ -11,7 +11,8 @@ Most download managers treat speed as the only goal. RAJA treats **"the file on 
 - **SHA-256 per block.** Each written block is hashed and the hash is stored. On resume, RAJA re-reads and re-checks those blocks; a segment whose data does not match is downloaded again rather than trusted.
 - **Server-change detection.** Resumed ranges are requested with `If-Range` and the stored ETag/Last-Modified. If the file on the server has changed, the download stops with a clear error instead of stitching old and new bytes together.
 - **Strict response checks.** `Content-Range` and `Content-Length` must match exactly what was asked for, and compressed (`Content-Encoding`) range replies are refused, so a misbehaving server or proxy cannot silently corrupt a segment.
-- **Automatic retries.** Dropped connections, resets and timeouts are retried with exponential back-off (4 attempts per segment) without losing the bytes already saved.
+- **Automatic retries.** Dropped connections, resets and timeouts are retried with exponential back-off (4 attempts per segment) without losing the bytes already saved. When a server says it is busy (HTTP 429/503), RAJA waits as long as the server asks (`Retry-After`, up to a minute) instead of hammering it.
+- **Honest state after a crash.** Downloads that were running when Windows or RAJA shut down are shown as paused on the next start, never as still downloading.
 - **Atomic finish.** The finished file is fully hashed (optionally checked against an expected SHA-256), then moved to its final name in one write-through rename. A finalization journal makes even a crash in the middle of this step recoverable on the next start; you never get a half-renamed file.
 - **Sparse, locked part files.** The part file is pre-sized as a sparse file (no time wasted writing zeros) and locked while in use, so two downloads can never write into the same file.
 - **Windows security marking.** Downloaded files get the standard "came from the internet" mark (Zone.Identifier), so Windows SmartScreen and Office Protected View treat them correctly.
@@ -21,14 +22,14 @@ Most download managers treat speed as the only goal. RAJA treats **"the file on 
 - **Desktop UI:** resizable columns, categories (Compressed, Documents, Music, Programs, Video), queues, scheduler, system tray, and a right-click menu with `Open`, `Open with...`, `Open folder`, `Move/Rename`, `Redownload`, `Refresh download address`, `Remove` and `Properties`.
 - **Progress window:** status, size, speed and time left, plus a per-connection view showing where each connection started and how far it has got.
 - **Browser extension:** a **Download this video** quality picker (1080p–360p, MP4/MKV) over HTML5 video players, and a **Download with Raja** item in the right-click menu. Requests from the browser open a small download-info window without bringing up the whole app.
-- **Video pages:** extraction through `yt-dlp` + `ffmpeg`, with titles in any language (including Hindi) kept intact in the saved file name.
+- **Video pages:** extraction through `yt-dlp` + `ffmpeg`, saved in the container you pick (MP4 or MKV), with the real size, speed and time left while video and audio streams download, and titles in any language (including Hindi) kept intact in the saved file name.
 - **Torrents and magnet links:** through `aria2c`, with a file-tree picker to choose which files to download and their priority.
 
 ## Quick Start
 
 ### 1. Install or run
-- **Installer:** run `Raja-0.2.1-Setup-x64.exe` (installs to `%LOCALAPPDATA%\Programs\Raja` and registers the browser native-messaging host).
-- **Portable:** extract `Raja-0.2.1-windows-x64.zip` and run `raja-ui.exe`.
+- **Installer:** run `Raja-0.2.2-Setup-x64.exe` (installs to `%LOCALAPPDATA%\Programs\Raja` and registers the browser native-messaging host).
+- **Portable:** extract `Raja-0.2.2-windows-x64.zip` and run `raja-ui.exe`.
 
 ### 2. Load the browser extension (Chrome / Edge / Brave)
 1. Open `chrome://extensions` (or `edge://extensions`) and turn on **Developer mode**.

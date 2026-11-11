@@ -147,6 +147,9 @@ struct RajaUi {
     core_executable: PathBuf,
     downloads: Vec<DownloadSummary>,
     progress_samples: HashMap<i64, ProgressSample>,
+    /// yt-dlp downloads video and audio one after the other; this keeps the
+    /// real per-stream progress and the combined size it announced up front.
+    video_streams: HashMap<i64, VideoStreams>,
     children: Vec<RunningProcess>,
     queue: VecDeque<i64>,
     queue_running: bool,
@@ -361,6 +364,9 @@ impl RajaUi {
         }
         let default_directory = default_download_directory();
         let mut init_storage = Storage::open(&database)?;
+        // Raja is single-instance and runs every download as its own child, so
+        // anything still "active" now was interrupted by an earlier shutdown.
+        init_storage.pause_interrupted_downloads()?;
         let saved_directory = init_storage.setting("download_directory")?;
         let saved_max_conn = init_storage
             .setting("max_connections")?
@@ -421,6 +427,7 @@ impl RajaUi {
             core_executable,
             downloads: Vec::new(),
             progress_samples: HashMap::new(),
+            video_streams: HashMap::new(),
             children: Vec::new(),
             queue: VecDeque::new(),
             queue_running: false,
@@ -1375,20 +1382,7 @@ impl RajaUi {
             self.output_suggested = false;
             self.add_dialog_max_height = max_height;
             self.add_description = description.unwrap_or_default().to_owned();
-            self.add_dialog_file_size = file_size.or_else(|| {
-                if is_video {
-                    Some(match max_height.unwrap_or(720) {
-                        1080 => 64_487_424,
-                        720 => 28_573_696,
-                        480 => 16_252_928,
-                        360 => 10_223_616,
-                        240 => 6_291_456,
-                        _ => 3_932_160,
-                    })
-                } else {
-                    None
-                }
-            });
+            self.add_dialog_file_size = file_size;
             self.show_add_dialog = true;
             if self.compact_view.is_some() || !self.is_main_visible() {
                 // Compact mode: show only the "Download File Info" box, not the main window.
@@ -2002,12 +1996,20 @@ impl RajaUi {
                 if let Err(error) = self.update_video_output_path(download_id, &output_path) {
                     self.status = format!("Could not save final video path: {error}");
                 }
-            } else if let Some((download_id, downloaded_bytes, total_bytes)) =
+            } else if let Some((download_id, announced)) = parse_video_size_line(&line) {
+                self.video_streams
+                    .entry(download_id)
+                    .or_default()
+                    .announced_total = Some(announced);
+            } else if let Some((download_id, downloaded_bytes, total_bytes, stream_id)) =
                 parse_video_progress_line(&line)
             {
                 let is_running = self.children.iter().any(|process| {
                     process.video_download == Some(download_id) && !process.stop_requested
                 });
+                let streams = self.video_streams.entry(download_id).or_default();
+                streams.record(stream_id.as_deref(), downloaded_bytes, total_bytes);
+                let (downloaded_bytes, total_bytes) = (streams.downloaded(), streams.total());
                 if is_running
                     && let Err(error) = self.update_video_status(
                         download_id,
@@ -4657,8 +4659,10 @@ fn draw_add_download_dialog(app: &mut RajaUi, context: &egui::Context) -> Option
                         .filter(|&sz| sz > 0)
                         .map(format_bytes)
                         .unwrap_or_else(|| {
+                            // Never invent a size: the real one is reported by
+                            // yt-dlp once the download starts.
                             if app.add_dialog_category == AddFileCategory::Video {
-                                "27.25 MB".to_owned()
+                                "Size unknown".to_owned()
                             } else {
                                 String::new()
                             }
@@ -5660,31 +5664,49 @@ fn draw_active_download_progress_dialog(
                         };
                         conn_rows.push((dl, start_f, end_f, info));
                     }
-                } else {
-                    // Multi-stream distribution for video / torrent or initializing HTTP
-                    let active_streams = 3usize.min(max_conn);
-                    let weights = [0.614_f64, 0.259_f64, 0.127_f64];
-                    let starts = [0.0_f32, 0.028_f32, 0.052_f32];
-                    for i in 0..active_streams {
-                        let dl = (download.durable_bytes as f64 * weights[i]) as u64;
-                        let span = (frac * weights[i] as f32 * 1.4).clamp(0.0, 0.28);
-                        let s_f = starts[i];
-                        let e_f = (s_f + span).min(1.0);
-                        let info = if is_complete {
+                } else if let Some(streams) = app
+                    .video_streams
+                    .get(&download.id)
+                    .filter(|streams| !streams.streams.is_empty())
+                {
+                    // Real yt-dlp streams (video, then audio), laid out one
+                    // after the other on the strip.
+                    let total_sz = streams.total().unwrap_or(1).max(1) as f32;
+                    let last = streams.streams.len() - 1;
+                    let mut start = 0_u64;
+                    for (index, stream) in streams.streams.iter().enumerate() {
+                        let (dl, stream_total) = (stream.downloaded, stream.total);
+                        let start_f = (start as f32 / total_sz).clamp(0.0, 1.0);
+                        let end_f = ((start + dl) as f32 / total_sz).clamp(start_f, 1.0);
+                        let info = if is_complete || index < last {
                             "Completed"
                         } else if is_active {
-                            if i == 0 && download.durable_bytes == 0 {
-                                "Connecting..."
-                            } else {
-                                "Receiving data..."
-                            }
+                            "Receiving data..."
                         } else if is_paused {
                             "Paused"
                         } else {
                             ""
                         };
-                        conn_rows.push((dl, s_f, e_f, info));
+                        conn_rows.push((dl, start_f, end_f, info));
+                        start += stream_total.unwrap_or(dl).max(dl);
                     }
+                } else if download.durable_bytes > 0 || is_active {
+                    // No per-stream detail (torrent, or an earlier session):
+                    // one honest row for the whole job.
+                    let info = if is_complete {
+                        "Completed"
+                    } else if is_active {
+                        if download.durable_bytes > 0 {
+                            "Receiving data..."
+                        } else {
+                            "Connecting..."
+                        }
+                    } else if is_paused {
+                        "Paused"
+                    } else {
+                        ""
+                    };
+                    conn_rows.push((download.durable_bytes, 0.0, frac, info));
                 }
                 while conn_rows.len() < max_conn {
                     conn_rows.push((0, 0.0, 0.0, ""));
@@ -6886,7 +6908,7 @@ fn video_extraction_arguments_for_height(
     }
     let format =
         format!("bestvideo[height<={max_height}]+bestaudio/best[height<={max_height}]/best");
-    Ok(vec![
+    let mut arguments = vec![
         "--ignore-config".to_owned(),
         "--newline".to_owned(),
         "--no-colors".to_owned(),
@@ -6896,10 +6918,44 @@ fn video_extraction_arguments_for_height(
         "--progress".to_owned(),
         "--format".to_owned(),
         format,
+    ];
+    // Honour the container the user picked (the Save As extension): without
+    // this yt-dlp chooses for itself and usually produces WebM.
+    match requested_video_container(output) {
+        Some("mp4") => arguments.extend([
+            // Same resolution, but prefer streams that fit MP4 natively
+            // (H.264/AV1 + AAC), so no re-encoding is needed.
+            "--format-sort".to_owned(),
+            "res,ext:mp4:m4a".to_owned(),
+            "--merge-output-format".to_owned(),
+            "mp4".to_owned(),
+            "--remux-video".to_owned(),
+            "mp4".to_owned(),
+        ]),
+        Some("mkv") => arguments.extend([
+            "--merge-output-format".to_owned(),
+            "mkv".to_owned(),
+            "--remux-video".to_owned(),
+            "mkv".to_owned(),
+        ]),
+        _ => {}
+    }
+    arguments.extend([
         "--output".to_owned(),
         output_template.to_string_lossy().into_owned(),
         url,
-    ])
+    ]);
+    Ok(arguments)
+}
+
+/// The container chosen in the Save As name (`.mp4` / `.mkv`), if any.
+fn requested_video_container(output: &std::path::Path) -> Option<&'static str> {
+    let extension = output.extension()?.to_str()?.to_ascii_lowercase();
+    match extension.as_str() {
+        "mp4" => Some("mp4"),
+        "mkv" => Some("mkv"),
+        _ => None,
+    }
 }
 
 fn video_job_arguments(
@@ -6923,8 +6979,11 @@ fn video_job_arguments_for_height(
     arguments.extend([
         "--progress-template".to_owned(),
         format!(
-            "download:RAJA_PROGRESS:{download_id}:%(progress.downloaded_bytes)s:%(progress.total_bytes_estimate)s"
+            "download:RAJA_PROGRESS:{download_id}:%(progress.downloaded_bytes)s:%(progress.total_bytes,progress.total_bytes_estimate)s:%(info.format_id)s"
         ),
+        // Combined size of the chosen video + audio, printed before downloading.
+        "--print".to_owned(),
+        format!("before_dl:RAJA_SIZE:{download_id}:%(filesize,filesize_approx)s"),
         "--print".to_owned(),
         format!("after_move:RAJA_OUTPUT:{download_id}:%(filepath)s"),
         url,
@@ -8089,16 +8148,131 @@ fn parse_aria2_progress(line: &str) -> Option<(u64, Option<u64>)> {
     Some((downloaded_bytes, total_bytes))
 }
 
-fn parse_video_progress_line(line: &str) -> Option<(i64, u64, Option<u64>)> {
+/// One `RAJA_PROGRESS` line: download id, bytes so far, total (if known) and
+/// the yt-dlp format id of the stream being downloaded (if printed).
+type VideoProgressLine = (i64, u64, Option<u64>, Option<String>);
+
+fn parse_video_progress_line(line: &str) -> Option<VideoProgressLine> {
     let progress = line.strip_prefix("RAJA_PROGRESS:")?;
     let mut fields = progress.split(':');
     let download_id = fields.next()?.parse().ok()?;
-    let downloaded_bytes = fields.next()?.parse().ok()?;
-    let total_bytes = fields.next().and_then(|value| value.parse().ok());
+    let downloaded_bytes = parse_ytdlp_byte_count(fields.next()?)?;
+    let total_bytes = fields.next().and_then(parse_ytdlp_byte_count);
+    let stream = fields
+        .next()
+        .map(str::trim)
+        .filter(|id| !id.is_empty() && *id != "NA")
+        .map(str::to_owned);
     if fields.next().is_some() {
         return None;
     }
-    Some((download_id, downloaded_bytes, total_bytes))
+    Some((download_id, downloaded_bytes, total_bytes, stream))
+}
+
+/// `RAJA_SIZE:<id>:<bytes>`: the combined size yt-dlp announces before it
+/// starts downloading.
+fn parse_video_size_line(line: &str) -> Option<(i64, u64)> {
+    let size = line.strip_prefix("RAJA_SIZE:")?;
+    let (download_id, bytes) = size.split_once(':')?;
+    Some((
+        download_id.parse().ok()?,
+        parse_ytdlp_byte_count(bytes).filter(|&bytes| bytes > 0)?,
+    ))
+}
+
+/// yt-dlp prints byte counts either as integers or, for estimates, as floats
+/// such as `28573696.0`; `NA`/`None` mean unknown.
+fn parse_ytdlp_byte_count(value: &str) -> Option<u64> {
+    let value = value.trim();
+    if let Ok(bytes) = value.parse::<u64>() {
+        return Some(bytes);
+    }
+    let float = value.parse::<f64>().ok()?;
+    (float.is_finite() && float >= 0.0).then(|| float.round() as u64)
+}
+
+/// Real progress of one yt-dlp job across its sequential streams.
+#[derive(Debug, Default, Clone, PartialEq)]
+struct VideoStreams {
+    /// One entry per stream (video, then audio), in download order.
+    streams: Vec<VideoStream>,
+    /// Combined size announced by yt-dlp before downloading, if any. It can
+    /// be too small (yt-dlp may only know some of the stream sizes).
+    announced_total: Option<u64>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+struct VideoStream {
+    /// yt-dlp format id, when printed.
+    id: Option<String>,
+    downloaded: u64,
+    /// Exact size or yt-dlp's running estimate (fragmented streams update it
+    /// on almost every line).
+    total: Option<u64>,
+}
+
+impl VideoStreams {
+    /// Records one progress line. A different format id, or (without ids) a
+    /// counter that goes backwards, means yt-dlp moved on to the next stream.
+    /// A changed total alone is just a refined estimate.
+    fn record(&mut self, id: Option<&str>, downloaded: u64, total: Option<u64>) {
+        let same_stream = self
+            .streams
+            .last()
+            .is_some_and(|last| match (id, &last.id) {
+                (Some(id), Some(last_id)) => id == last_id,
+                _ => downloaded >= last.downloaded,
+            });
+        if same_stream {
+            let last = self.streams.last_mut().expect("checked above");
+            last.downloaded = last.downloaded.max(downloaded);
+            if total.is_some() {
+                last.total = total;
+            }
+            return;
+        }
+        if let Some(last) = self.streams.last_mut() {
+            // The previous stream is finished: count it as complete.
+            if let Some(total) = last.total {
+                last.downloaded = last.downloaded.max(total);
+            }
+            last.total = Some(last.downloaded);
+        }
+        self.streams.push(VideoStream {
+            id: id.map(str::to_owned),
+            downloaded,
+            total,
+        });
+    }
+
+    fn downloaded(&self) -> u64 {
+        self.streams.iter().map(|stream| stream.downloaded).sum()
+    }
+
+    /// Best known total: the larger of the announced size and the sum of the
+    /// stream sizes; never smaller than what is already downloaded.
+    fn total(&self) -> Option<u64> {
+        let any_stream_total = self.streams.iter().any(|stream| stream.total.is_some());
+        if self.announced_total.is_none() && !any_stream_total {
+            return None;
+        }
+        let from_streams: u64 = self
+            .streams
+            .iter()
+            .map(|stream| {
+                stream
+                    .total
+                    .unwrap_or(stream.downloaded)
+                    .max(stream.downloaded)
+            })
+            .sum();
+        Some(
+            self.announced_total
+                .unwrap_or(0)
+                .max(from_streams)
+                .max(self.downloaded()),
+        )
+    }
 }
 
 /// Returns `reported` if it exists; otherwise looks in the same folder for the
@@ -8218,11 +8392,53 @@ impl Drop for SingleInstance {
     }
 }
 
+/// Hands a URL from a second launch (`--add-url`, `raja://` link) to the
+/// already-running Raja through the browser inbox it watches, so the link is
+/// not lost when Raja is sitting in the system tray.
+fn forward_url_to_running_instance(url: &str) -> Result<(), String> {
+    let database = raja_core::app::default_database_path().map_err(|error| error.to_string())?;
+    let inbox = database
+        .parent()
+        .ok_or_else(|| "Raja database has no parent folder.".to_owned())?
+        .join("browser-inbox");
+    std::fs::create_dir_all(&inbox).map_err(|error| error.to_string())?;
+    let kind = if is_likely_video_page_url(url) {
+        "video"
+    } else {
+        "http"
+    };
+    let request = serde_json::json!({ "url": url, "kind": kind });
+    let bytes = serde_json::to_vec(&request).map_err(|error| error.to_string())?;
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_err(|error| error.to_string())?
+        .as_nanos();
+    // Write under a temporary name, then rename: the watcher only picks up
+    // finished `.json` files.
+    let temp = inbox.join(format!("request-{}-{nanos}.tmp", std::process::id()));
+    std::fs::write(&temp, bytes).map_err(|error| error.to_string())?;
+    std::fs::rename(&temp, temp.with_extension("json")).map_err(|error| error.to_string())
+}
+
 fn main() -> eframe::Result<()> {
     #[cfg(windows)]
     let _instance = match SingleInstance::acquire() {
         Ok(Some(instance)) => instance,
-        Ok(None) => return Ok(()),
+        Ok(None) => {
+            // Raja is already running: pass the link on instead of dropping it.
+            let mut arguments = std::env::args_os().skip(1).peekable();
+            if arguments
+                .peek()
+                .is_some_and(|argument| argument == "--background")
+            {
+                arguments.next();
+            }
+            if let Ok(Some(url)) = parse_launch_url(arguments) {
+                forward_url_to_running_instance(&url)
+                    .map_err(|error| eframe::Error::AppCreation(error.into()))?;
+            }
+            return Ok(());
+        }
         Err(error) => return Err(eframe::Error::AppCreation(error.into())),
     };
     #[cfg(windows)]
@@ -8330,11 +8546,11 @@ fn render_3d_app_icon(size: usize) -> Vec<u8> {
 #[cfg(test)]
 mod tests {
     use super::{
-        DownloadCategory, ProgressSample, browser_suggested_filename, format_duration,
-        last_attempt_label, parse_launch_url, parse_video_output_line, parse_video_progress_line,
-        queueable_download_ids, suggested_filename, time_left_label, transfer_rate_label,
-        video_extraction_arguments, video_extraction_arguments_for_height, video_job_arguments,
-        video_output_template,
+        DownloadCategory, ProgressSample, VideoStreams, browser_suggested_filename,
+        format_duration, last_attempt_label, parse_launch_url, parse_video_output_line,
+        parse_video_progress_line, parse_video_size_line, queueable_download_ids,
+        suggested_filename, time_left_label, transfer_rate_label, video_extraction_arguments,
+        video_extraction_arguments_for_height, video_job_arguments, video_output_template,
     };
     use raja_core::storage::DownloadSummary;
     use std::ffi::OsString;
@@ -8406,11 +8622,42 @@ mod tests {
                 "--progress",
                 "--format",
                 "bestvideo[height<=1080]+bestaudio/best[height<=1080]/best",
+                "--format-sort",
+                "res,ext:mp4:m4a",
+                "--merge-output-format",
+                "mp4",
+                "--remux-video",
+                "mp4",
                 "--output",
                 r"C:\My Videos\clip.%(ext)s",
                 "https://example.com/watch?v=clip"
             ]
         );
+    }
+
+    #[test]
+    fn video_arguments_honour_the_chosen_container() {
+        let value_after = |arguments: &[String], flag: &str| {
+            arguments
+                .windows(2)
+                .find(|pair| pair[0] == flag)
+                .map(|pair| pair[1].clone())
+        };
+        let mkv =
+            video_extraction_arguments("https://example.com/watch?v=clip", Path::new("a.MKV"))
+                .unwrap();
+        assert_eq!(
+            value_after(&mkv, "--merge-output-format").as_deref(),
+            Some("mkv")
+        );
+        assert_eq!(value_after(&mkv, "--remux-video").as_deref(), Some("mkv"));
+        assert_eq!(value_after(&mkv, "--format-sort"), None);
+
+        let webm =
+            video_extraction_arguments("https://example.com/watch?v=clip", Path::new("a.webm"))
+                .unwrap();
+        assert_eq!(value_after(&webm, "--merge-output-format"), None);
+        assert_eq!(value_after(&webm, "--remux-video"), None);
     }
 
     #[test]
@@ -8448,9 +8695,12 @@ mod tests {
             video_job_arguments(9, "https://example.com/watch?v=clip", Path::new("clip.mp4"))
                 .unwrap();
         assert!(arguments.contains(
-            &"download:RAJA_PROGRESS:9:%(progress.downloaded_bytes)s:%(progress.total_bytes_estimate)s"
+            &"download:RAJA_PROGRESS:9:%(progress.downloaded_bytes)s:%(progress.total_bytes,progress.total_bytes_estimate)s:%(info.format_id)s"
                 .to_owned()
         ));
+        assert!(
+            arguments.contains(&"before_dl:RAJA_SIZE:9:%(filesize,filesize_approx)s".to_owned())
+        );
         assert!(arguments.contains(&"after_move:RAJA_OUTPUT:9:%(filepath)s".to_owned()));
         assert_eq!(
             arguments.last().map(String::as_str),
@@ -8462,13 +8712,76 @@ mod tests {
     fn parses_video_progress_and_optional_total_size() {
         assert_eq!(
             parse_video_progress_line("RAJA_PROGRESS:42:128:512"),
-            Some((42, 128, Some(512)))
+            Some((42, 128, Some(512), None))
         );
         assert_eq!(
             parse_video_progress_line("RAJA_PROGRESS:42:128:NA"),
-            Some((42, 128, None))
+            Some((42, 128, None, None))
+        );
+        assert_eq!(
+            parse_video_progress_line("RAJA_PROGRESS:42:128:512:140"),
+            Some((42, 128, Some(512), Some("140".to_owned())))
         );
         assert_eq!(parse_video_progress_line("[download] 50%"), None);
+    }
+
+    #[test]
+    fn parses_float_estimates_and_announced_sizes_from_ytdlp() {
+        // yt-dlp prints estimates as floats; these used to become "Unknown".
+        assert_eq!(
+            parse_video_progress_line("RAJA_PROGRESS:7:1024:28573696.0:605"),
+            Some((7, 1024, Some(28_573_696), Some("605".to_owned())))
+        );
+        assert_eq!(
+            parse_video_size_line("RAJA_SIZE:7:610003799"),
+            Some((7, 610_003_799))
+        );
+        assert_eq!(parse_video_size_line("RAJA_SIZE:7:NA"), None);
+        assert_eq!(parse_video_size_line("RAJA_SIZE:7:0"), None);
+    }
+
+    #[test]
+    fn video_streams_add_up_sequential_video_and_audio_downloads() {
+        let mut streams = VideoStreams::default();
+        streams.record(Some("160"), 100, Some(1000));
+        streams.record(Some("160"), 1000, Some(1000));
+        // Audio stream starts: a new format id, counter back at 0.
+        streams.record(Some("140"), 0, Some(200));
+        streams.record(Some("140"), 50, Some(200));
+        assert_eq!(streams.streams.len(), 2);
+        assert_eq!(streams.downloaded(), 1050);
+        assert_eq!(streams.total(), Some(1200));
+
+        // The announced size is used when larger, never below the streams.
+        streams.announced_total = Some(5000);
+        assert_eq!(streams.total(), Some(5000));
+        streams.announced_total = Some(500);
+        assert_eq!(streams.total(), Some(1200));
+    }
+
+    #[test]
+    fn changing_estimates_of_a_fragmented_stream_stay_one_stream() {
+        // Real yt-dlp output for a fragmented MP4 stream: the estimate
+        // changes on almost every line. This used to become 12 GB.
+        let mut streams = VideoStreams::default();
+        for (done, estimate) in [(712, 712), (712, 353_152), (2_414_479, 31_408_377)] {
+            streams.record(Some("605"), done, Some(estimate));
+        }
+        streams.record(Some("605"), 29_563_296, Some(35_413_920));
+        assert_eq!(streams.streams.len(), 1);
+        assert_eq!(streams.downloaded(), 29_563_296);
+        assert_eq!(streams.total(), Some(35_413_920));
+    }
+
+    #[test]
+    fn video_streams_without_ids_split_when_the_counter_restarts() {
+        let mut streams = VideoStreams::default();
+        streams.record(None, 900, Some(1000));
+        streams.record(None, 900, Some(1100));
+        streams.record(None, 10, Some(300));
+        assert_eq!(streams.streams.len(), 2);
+        assert_eq!(streams.streams[0].downloaded, 1100);
+        assert_eq!(streams.downloaded(), 1110);
     }
 
     #[test]

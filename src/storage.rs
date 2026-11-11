@@ -896,6 +896,29 @@ impl Storage {
         Ok(())
     }
 
+    /// Marks downloads left "active" by a previous session (crash, kill,
+    /// power cut) as paused, so they are not shown as running when nothing is
+    /// downloading. A still-running orphan engine sees "paused" before its next
+    /// write and stops cleanly. Returns how many downloads were changed.
+    pub fn pause_interrupted_downloads(&mut self) -> Result<usize, StorageError> {
+        let now = unix_timestamp()?;
+        let transaction = self
+            .connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        transaction.execute(
+            "INSERT INTO events (download_id, event_type, message, created_at)
+             SELECT id, 'paused', 'Interrupted by an earlier shutdown; paused', ?1
+             FROM downloads WHERE status = 'active'",
+            [now],
+        )?;
+        let updated = transaction.execute(
+            "UPDATE downloads SET status = 'paused' WHERE status = 'active'",
+            [],
+        )?;
+        transaction.commit()?;
+        Ok(updated)
+    }
+
     pub(crate) fn pause_download(&mut self, download_id: i64) -> Result<(), StorageError> {
         let transaction = self
             .connection
@@ -2289,6 +2312,32 @@ mod tests {
             Err(StorageError::UnsupportedSchemaVersion(version))
                 if version == SCHEMA_VERSION + 1
         ));
+    }
+
+    #[test]
+    fn pauses_downloads_left_active_by_an_earlier_session() {
+        let database = TestDatabase::new();
+        let mut storage = Storage::open(&database.0).unwrap();
+        let http = storage
+            .create_download("https://example.test/a", "a.bin", "downloads", Some(10))
+            .unwrap();
+        storage.mark_download_active(http).unwrap();
+        let video = storage
+            .create_video_download("https://example.test/v", "v.mp4", "downloads")
+            .unwrap();
+        storage
+            .update_video_download(video, "active", Some(1), None, None)
+            .unwrap();
+
+        assert_eq!(storage.pause_interrupted_downloads().unwrap(), 2);
+        assert!(
+            storage
+                .list_downloads()
+                .unwrap()
+                .iter()
+                .all(|download| download.status == "paused")
+        );
+        assert_eq!(storage.pause_interrupted_downloads().unwrap(), 0);
     }
 
     #[test]

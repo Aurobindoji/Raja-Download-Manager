@@ -6,7 +6,7 @@ use std::time::Duration;
 use reqwest::blocking::{Client, Response};
 use reqwest::header::{
     ACCEPT_ENCODING, CONTENT_ENCODING, CONTENT_LENGTH, CONTENT_RANGE, ETAG, IF_RANGE,
-    LAST_MODIFIED, RANGE,
+    LAST_MODIFIED, RANGE, RETRY_AFTER,
 };
 
 use crate::part_file::{PartFile, PartFileError};
@@ -15,6 +15,11 @@ use crate::storage::{SourceValidators, Storage, StorageError};
 const WRITE_BUFFER_SIZE: usize = 256 * 1024;
 const MAX_RETRIES: u32 = 4;
 const RETRY_BASE_DELAY: Duration = Duration::from_millis(250);
+/// First wait after "server busy" (HTTP 429/503) without a Retry-After header;
+/// doubles on every further attempt.
+const BUSY_BASE_DELAY: Duration = Duration::from_secs(1);
+/// Longest single wait, even if the server asks for more.
+const MAX_BUSY_DELAY: Duration = Duration::from_secs(60);
 
 #[derive(Debug)]
 pub enum HttpRangeError {
@@ -26,16 +31,30 @@ pub enum HttpRangeError {
     UnsupportedUrlScheme,
     EmptyFileUnsupported,
     UnexpectedStatus(u16),
+    /// HTTP 429 Too Many Requests / 503 Service Unavailable: the server wants
+    /// the client to slow down, optionally saying how long (Retry-After).
+    ServerBusy {
+        status: u16,
+        retry_after: Option<Duration>,
+    },
     MissingContentLength,
     MissingContentRange,
     InvalidContentRange,
     ContentRangeMismatch,
     SourceChanged,
     MissingSourceValidator,
-    ContentLengthMismatch { expected: u64, actual: u64 },
+    ContentLengthMismatch {
+        expected: u64,
+        actual: u64,
+    },
     InvalidContentLength,
-    BodyLengthMismatch { expected: u64, actual: u64 },
-    BodyExceedsRange { expected: u64 },
+    BodyLengthMismatch {
+        expected: u64,
+        actual: u64,
+    },
+    BodyExceedsRange {
+        expected: u64,
+    },
     EncodedRangeResponse,
     SegmentNotReady,
     SegmentAlreadyComplete,
@@ -55,12 +74,19 @@ impl fmt::Display for HttpRangeError {
             Self::EmptyFileUnsupported => {
                 formatter.write_str("zero-byte downloads are not supported yet")
             }
-            Self::UnexpectedStatus(status) => {
+            Self::UnexpectedStatus(status) if (200..300).contains(status) => {
                 write!(
                     formatter,
                     "server did not honor the byte range (HTTP {status})"
                 )
             }
+            Self::UnexpectedStatus(status) => {
+                write!(formatter, "server returned an error (HTTP {status})")
+            }
+            Self::ServerBusy { status, .. } => write!(
+                formatter,
+                "server is busy and asked to slow down (HTTP {status}); try again in a minute"
+            ),
             Self::MissingContentLength => {
                 formatter.write_str("server omitted Content-Length for a full-file response")
             }
@@ -134,9 +160,45 @@ impl HttpRangeError {
             Self::UnexpectedStatus(status) => {
                 matches!(*status, 408 | 425 | 429) || (500..=599).contains(status)
             }
+            Self::ServerBusy { .. } => true,
             _ => false,
         }
     }
+
+    /// How long to wait before attempt `retries + 1`.
+    fn retry_delay(&self, retries: u32) -> Duration {
+        match self {
+            Self::ServerBusy {
+                retry_after: Some(wait),
+                ..
+            } => (*wait).min(MAX_BUSY_DELAY),
+            Self::ServerBusy { .. } => (BUSY_BASE_DELAY * (1 << retries)).min(MAX_BUSY_DELAY),
+            _ => RETRY_BASE_DELAY * (1 << retries),
+        }
+    }
+}
+
+/// Error for a response whose status cannot be used.
+fn status_error(response: &Response) -> HttpRangeError {
+    let status = response.status().as_u16();
+    if matches!(status, 429 | 503) {
+        HttpRangeError::ServerBusy {
+            status,
+            retry_after: response
+                .headers()
+                .get(RETRY_AFTER)
+                .and_then(|value| value.to_str().ok())
+                .and_then(parse_retry_after_seconds),
+        }
+    } else {
+        HttpRangeError::UnexpectedStatus(status)
+    }
+}
+
+/// Parses a `Retry-After` value given in seconds (the HTTP-date form is
+/// ignored and falls back to the normal back-off).
+fn parse_retry_after_seconds(value: &str) -> Option<Duration> {
+    value.trim().parse::<u64>().ok().map(Duration::from_secs)
 }
 
 impl From<StorageError> for HttpRangeError {
@@ -193,7 +255,7 @@ impl HttpRangeClient {
                     .ok_or(HttpRangeError::MissingContentLength)?;
                 parse_unsigned_header(content_length)?
             }
-            status => return Err(HttpRangeError::UnexpectedStatus(status)),
+            _ => return Err(status_error(&response)),
         };
         if size == 0 {
             return Err(HttpRangeError::EmptyFileUnsupported);
@@ -241,8 +303,7 @@ impl HttpRangeClient {
             match self.download_segment_once(url, part_file, storage, segment_id) {
                 Ok(ready_to_finalize) => return Ok(ready_to_finalize),
                 Err(error) if error.is_retryable() && retries < MAX_RETRIES => {
-                    let delay = RETRY_BASE_DELAY * (1 << retries);
-                    std::thread::sleep(delay);
+                    std::thread::sleep(error.retry_delay(retries));
                     retries += 1;
                 }
                 Err(error) => return Err(error),
@@ -305,7 +366,7 @@ impl HttpRangeClient {
         } else if response.status().as_u16() == 206 {
             validate_content_range(&response, cursor, requested_end, total_size)?;
         } else {
-            return Err(HttpRangeError::UnexpectedStatus(response.status().as_u16()));
+            return Err(status_error(&response));
         }
         let response_validators = response_validators(&response)?;
         if !stored_validators.matches(&response_validators) {
@@ -479,7 +540,9 @@ mod tests {
     use crate::part_file::PartFile;
     use crate::storage::{SourceValidators, Storage};
 
-    use super::{HttpRangeClient, HttpRangeError};
+    use std::time::Duration;
+
+    use super::{HttpRangeClient, HttpRangeError, parse_retry_after_seconds};
 
     static NEXT_TEST_ID: AtomicU64 = AtomicU64::new(0);
 
@@ -572,6 +635,7 @@ mod tests {
                     stream
                         .write_all(
                             b"HTTP/1.1 503 Service Unavailable\r\n\
+                              Retry-After: 0\r\n\
                               Content-Length: 0\r\n\
                               Connection: close\r\n\r\n",
                         )
@@ -611,6 +675,43 @@ mod tests {
                 .any(|line| line.eq_ignore_ascii_case("Range: bytes=0-3"))
         }));
         assert_eq!(storage.segment_status(segment_id).unwrap(), "complete");
+    }
+
+    #[test]
+    fn server_busy_waits_as_asked_and_says_so_clearly() {
+        let busy = |retry_after| HttpRangeError::ServerBusy {
+            status: 429,
+            retry_after,
+        };
+        assert!(busy(None).is_retryable());
+        assert_eq!(
+            busy(Some(Duration::from_secs(5))).retry_delay(0),
+            Duration::from_secs(5)
+        );
+        assert_eq!(
+            busy(Some(Duration::from_secs(3600))).retry_delay(0),
+            Duration::from_secs(60)
+        );
+        assert_eq!(busy(None).retry_delay(0), Duration::from_secs(1));
+        assert_eq!(busy(None).retry_delay(3), Duration::from_secs(8));
+        let message = busy(None).to_string();
+        assert!(
+            message.contains("busy") && message.contains("429"),
+            "{message}"
+        );
+        assert!(!message.contains("byte range"));
+        assert_eq!(
+            HttpRangeError::UnexpectedStatus(404).to_string(),
+            "server returned an error (HTTP 404)"
+        );
+        assert_eq!(
+            parse_retry_after_seconds(" 12 "),
+            Some(Duration::from_secs(12))
+        );
+        assert_eq!(
+            parse_retry_after_seconds("Wed, 21 Oct 2015 07:28:00 GMT"),
+            None
+        );
     }
 
     #[test]

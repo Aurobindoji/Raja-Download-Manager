@@ -5082,8 +5082,10 @@ fn draw_active_download_progress_dialog(app: &mut RajaUi, context: &egui::Contex
     let mut cancel_download = false;
     let mut open_completed = false;
 
+    #[allow(deprecated)]
+    let win_id = egui::Id::new("idm-active-download-progress-window");
     egui::Window::new(window_title)
-        .id(egui::Id::new("idm-active-download-progress-window"))
+        .id(win_id)
         .open(&mut open)
         .collapsible(false)
         .resizable(false)

@@ -255,6 +255,15 @@ pub struct DownloadSummary {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SegmentSummary {
+    pub id: i64,
+    pub range_start: u64,
+    pub range_end: u64,
+    pub cursor: u64,
+    pub status: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct PendingFinalization {
     pub segment_id: i64,
     pub part_path: String,
@@ -655,6 +664,38 @@ impl Storage {
         }
         transaction.commit()?;
         Ok(())
+    }
+
+    pub fn list_download_segments(
+        &self,
+        download_id: i64,
+    ) -> Result<Vec<SegmentSummary>, StorageError> {
+        let mut statement = self.connection.prepare(
+            "SELECT id, range_start, range_end, cursor, status
+             FROM segments
+             WHERE download_id = ?1
+             ORDER BY range_start ASC, id ASC",
+        )?;
+        let rows = statement.query_map([download_id], |row| {
+            let id: i64 = row.get(0)?;
+            let start: i64 = row.get(1)?;
+            let end: i64 = row.get(2)?;
+            let cur: i64 = row.get(3)?;
+            let status: String = row.get(4)?;
+            Ok((id, start, end, cur, status))
+        })?;
+        let mut segments = Vec::new();
+        for row in rows {
+            let (id, start, end, cur, status) = row?;
+            segments.push(SegmentSummary {
+                id,
+                range_start: from_sqlite_integer(start, "segment range_start")?,
+                range_end: from_sqlite_integer(end, "segment range_end")?,
+                cursor: from_sqlite_integer(cur, "segment cursor")?,
+                status,
+            });
+        }
+        Ok(segments)
     }
 
     pub fn update_download_output(

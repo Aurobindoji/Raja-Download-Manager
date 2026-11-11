@@ -28,8 +28,8 @@ Most download managers treat speed as the only goal. RAJA treats **"the file on 
 ## Quick Start
 
 ### 1. Install or run
-- **Installer:** run `Raja-0.2.3-Setup-x64.exe` (installs to `%LOCALAPPDATA%\Programs\Raja` and registers the browser native-messaging host).
-- **Portable:** extract `Raja-0.2.3-windows-x64.zip` and run `raja-ui.exe`.
+- **Installer:** run `Raja-0.2.4-Setup-x64.exe` (installs to `%LOCALAPPDATA%\Programs\Raja` and registers the browser native-messaging host).
+- **Portable:** extract `Raja-0.2.4-windows-x64.zip` and run `raja-ui.exe`.
 
 ### 2. Load the browser extension (Chrome / Edge / Brave)
 1. Open `chrome://extensions` (or `edge://extensions`) and turn on **Developer mode**.

@@ -4367,7 +4367,10 @@ fn draw_add_download_dialog(app: &mut RajaUi, context: &egui::Context) -> Option
     let window = if compact {
         window.anchor(egui::Align2::LEFT_TOP, egui::Vec2::ZERO)
     } else {
+        // Open centred over the main window, like IDM's progress dialog.
         window
+            .pivot(egui::Align2::CENTER_CENTER)
+            .default_pos(context.content_rect().center())
     };
     let window_rect = window
         .show(context, |ui| {
@@ -5310,7 +5313,10 @@ fn draw_active_download_progress_dialog(
     let window = if compact {
         window.anchor(egui::Align2::LEFT_TOP, egui::Vec2::ZERO)
     } else {
+        // Open centred over the main window, like IDM's progress dialog.
         window
+            .pivot(egui::Align2::CENTER_CENTER)
+            .default_pos(context.content_rect().center())
     };
     let window_rect = window
         .show(context, |ui| {
@@ -5389,7 +5395,7 @@ fn draw_active_download_progress_dialog(
             }
 
             // 2. Main Tab Content Box
-            let box_h = 166.0;
+            let box_h = 152.0;
             let (box_rect, _) =
                 ui.allocate_exact_size(egui::vec2(536.0, box_h), egui::Sense::hover());
             ui.painter().rect_filled(box_rect, 0.0, box_bg);
@@ -5422,7 +5428,7 @@ fn draw_active_download_progress_dialog(
                 egui::Stroke::new(1.0, border_col),
             );
 
-            let content_rect = box_rect.shrink2(egui::vec2(14.0, 10.0));
+            let content_rect = box_rect.shrink2(egui::vec2(16.0, 8.0));
             let mut box_ui = ui.new_child(
                 egui::UiBuilder::new()
                     .max_rect(content_rect)
@@ -5432,20 +5438,8 @@ fn draw_active_download_progress_dialog(
 
             match app.progress_dialog_tab {
                 ProgressDialogTab::DownloadStatus => {
-                    // URL line (single line clipped)
-                    let (url_rect, _) = box_ui.allocate_exact_size(
-                        egui::vec2(content_rect.width(), 18.0),
-                        egui::Sense::hover(),
-                    );
-                    box_ui.painter().with_clip_rect(url_rect).text(
-                        egui::pos2(url_rect.left(), url_rect.center().y),
-                        egui::Align2::LEFT_CENTER,
-                        &download.source_url,
-                        egui::FontId::proportional(12.2),
-                        egui::Color32::from_rgb(238, 238, 242),
-                    );
-
-                    // Status row
+                    // IDM grid: labels at a fixed left column, values at a fixed
+                    // value column, every row on a fixed 18 px pitch.
                     let status_msg = if is_complete {
                         "Download complete"
                     } else if is_active {
@@ -5461,34 +5455,12 @@ fn draw_active_download_progress_dialog(
                     } else {
                         "Queued"
                     };
-                    box_ui.horizontal(|ui| {
-                        ui.allocate_ui_with_layout(
-                            egui::vec2(72.0, 18.0),
-                            egui::Layout::left_to_right(egui::Align::Center),
-                            |ui| {
-                                ui.label(
-                                    egui::RichText::new("Status")
-                                        .size(12.2)
-                                        .color(egui::Color32::from_rgb(232, 232, 236)),
-                                );
-                            },
-                        );
-                        ui.label(
-                            egui::RichText::new(status_msg)
-                                .size(12.2)
-                                .color(egui::Color32::from_rgb(238, 238, 242)),
-                        );
-                    });
-
-                    box_ui.add_space(5.0);
-
-                    let label_col = 128.0;
                     let size_str = download
                         .total_size
                         .map_or_else(|| "Unknown".to_owned(), format_idm_size_3dec);
                     let dl_str = if download.total_size.is_some() || is_complete {
                         format!(
-                            "{} ( {:.2} % )",
+                            "{}  ( {:.2} % )",
                             format_idm_size_3dec(download.durable_bytes),
                             pct_val
                         )
@@ -5503,51 +5475,50 @@ fn draw_active_download_progress_dialog(
                         is_active,
                     );
 
+                    let font = egui::FontId::proportional(12.5);
+                    let label_color = egui::Color32::from_rgb(214, 214, 220);
+                    let value_color = egui::Color32::from_rgb(242, 242, 246);
+                    let painter = box_ui.painter().with_clip_rect(content_rect);
+                    let left = content_rect.left();
+                    let value_x = left + 104.0;
+                    let row = |y: f32, label: &str, value: &str, vx: f32| {
+                        painter.text(
+                            egui::pos2(left, y),
+                            egui::Align2::LEFT_CENTER,
+                            label,
+                            font.clone(),
+                            label_color,
+                        );
+                        painter.text(
+                            egui::pos2(vx, y),
+                            egui::Align2::LEFT_CENTER,
+                            value,
+                            font.clone(),
+                            value_color,
+                        );
+                    };
+
+                    let mut y = content_rect.top() + 8.0;
+                    painter.text(
+                        egui::pos2(left, y),
+                        egui::Align2::LEFT_CENTER,
+                        &download.source_url,
+                        font.clone(),
+                        value_color,
+                    );
+                    y += 19.0;
+                    row(y, "Status", status_msg, value_x);
+                    y += 27.0;
                     for (lbl, val) in [
                         ("File size", size_str.as_str()),
                         ("Downloaded", dl_str.as_str()),
                         ("Transfer rate", rate_str.as_str()),
                         ("Time left", eta_str.as_str()),
                     ] {
-                        box_ui.horizontal(|ui| {
-                            ui.allocate_ui_with_layout(
-                                egui::vec2(label_col, 17.0),
-                                egui::Layout::left_to_right(egui::Align::Center),
-                                |ui| {
-                                    ui.label(
-                                        egui::RichText::new(lbl)
-                                            .size(12.2)
-                                            .color(egui::Color32::from_rgb(232, 232, 236)),
-                                    );
-                                },
-                            );
-                            ui.label(
-                                egui::RichText::new(val)
-                                    .size(12.2)
-                                    .color(egui::Color32::from_rgb(238, 238, 242)),
-                            );
-                        });
+                        row(y, lbl, val, value_x);
+                        y += 18.0;
                     }
-
-                    // Resume capability row
-                    box_ui.horizontal(|ui| {
-                        ui.allocate_ui_with_layout(
-                            egui::vec2(204.0, 17.0),
-                            egui::Layout::left_to_right(egui::Align::Center),
-                            |ui| {
-                                ui.label(
-                                    egui::RichText::new("Resume capability")
-                                        .size(12.2)
-                                        .color(egui::Color32::from_rgb(232, 232, 236)),
-                                );
-                            },
-                        );
-                        ui.label(
-                            egui::RichText::new("Yes")
-                                .size(12.2)
-                                .color(egui::Color32::from_rgb(238, 238, 242)),
-                        );
-                    });
+                    row(y, "Resume capability", "Yes", left + 200.0);
                 }
                 ProgressDialogTab::SpeedLimiter => {
                     box_ui.add_space(10.0);
@@ -5579,124 +5550,92 @@ fn draw_active_download_progress_dialog(
                 }
             }
 
-            ui.add_space(12.0);
+            ui.add_space(10.0);
 
-            // 3. Main Green Progress Bar
+            // 3. Main Green Progress Bar (sunken track with a thin border)
             let (prog_rect, _) =
-                ui.allocate_exact_size(egui::vec2(536.0, 17.0), egui::Sense::hover());
+                ui.allocate_exact_size(egui::vec2(536.0, 18.0), egui::Sense::hover());
             ui.painter()
-                .rect_filled(prog_rect, 0.0, egui::Color32::from_rgb(232, 232, 235));
+                .rect_filled(prog_rect, 0.0, egui::Color32::from_rgb(230, 230, 233));
             let frac = (pct_val as f32 / 100.0).clamp(0.0, 1.0);
+            let bar_inner = prog_rect.shrink(2.0);
             if frac > 0.0 {
                 let fill_rect = egui::Rect::from_min_max(
-                    prog_rect.min,
+                    bar_inner.min,
                     egui::pos2(
-                        prog_rect.left() + prog_rect.width() * frac,
-                        prog_rect.bottom(),
+                        bar_inner.left() + bar_inner.width() * frac,
+                        bar_inner.bottom(),
                     ),
                 );
                 ui.painter()
                     .rect_filled(fill_rect, 0.0, egui::Color32::from_rgb(16, 124, 16));
             }
+            ui.painter().rect_stroke(
+                prog_rect,
+                0.0,
+                egui::Stroke::new(1.0, egui::Color32::from_rgb(120, 120, 126)),
+                egui::StrokeKind::Inside,
+            );
 
             ui.add_space(12.0);
 
-            // 4. Buttons Row: [ << Hide details ]        [ Pause ]     [ Cancel ]
-            ui.horizontal(|ui| {
-                ui.add_space(14.0);
-                let details_label = if app.progress_show_details {
-                    "<< Hide details"
-                } else {
-                    "Details >>"
-                };
-                if ui
-                    .add(
-                        egui::Button::new(
-                            egui::RichText::new(details_label)
-                                .size(12.0)
-                                .color(egui::Color32::from_rgb(235, 235, 240)),
-                        )
-                        .min_size(egui::vec2(142.0, 24.0))
-                        .fill(egui::Color32::from_rgb(45, 45, 48))
-                        .stroke(egui::Stroke::new(
-                            1.0,
-                            egui::Color32::from_rgb(135, 135, 140),
-                        )),
+            // 4. Buttons Row: [ << Hide details ] ............ [ Pause ]  [ Cancel ]
+            let (btn_row, _) =
+                ui.allocate_exact_size(egui::vec2(536.0, 24.0), egui::Sense::hover());
+            let idm_button = |ui: &mut egui::Ui, rect: egui::Rect, label: &str| {
+                ui.put(
+                    rect,
+                    egui::Button::new(
+                        egui::RichText::new(label)
+                            .size(12.0)
+                            .color(egui::Color32::from_rgb(235, 235, 240)),
                     )
-                    .clicked()
-                {
-                    app.progress_show_details = !app.progress_show_details;
+                    .fill(egui::Color32::from_rgb(45, 45, 48))
+                    .stroke(egui::Stroke::new(
+                        1.0,
+                        egui::Color32::from_rgb(135, 135, 140),
+                    )),
+                )
+                .clicked()
+            };
+            let details_label = if app.progress_show_details {
+                "<< Hide details"
+            } else {
+                "Details >>"
+            };
+            let details_rect = egui::Rect::from_min_size(
+                egui::pos2(btn_row.left() + 14.0, btn_row.top()),
+                egui::vec2(140.0, 24.0),
+            );
+            if idm_button(ui, details_rect, details_label) {
+                app.progress_show_details = !app.progress_show_details;
+            }
+            let cancel_rect = egui::Rect::from_min_size(
+                egui::pos2(btn_row.right() - 14.0 - 80.0, btn_row.top()),
+                egui::vec2(80.0, 24.0),
+            );
+            let primary_rect = egui::Rect::from_min_size(
+                egui::pos2(cancel_rect.left() - 28.0 - 86.0, btn_row.top()),
+                egui::vec2(86.0, 24.0),
+            );
+            if is_complete {
+                if idm_button(ui, primary_rect, "Open") {
+                    open_completed = true;
                 }
-
-                ui.add_space(150.0);
-
-                if is_complete {
-                    if ui
-                        .add(
-                            egui::Button::new(
-                                egui::RichText::new("Open")
-                                    .size(12.0)
-                                    .color(egui::Color32::from_rgb(235, 235, 240)),
-                            )
-                            .min_size(egui::vec2(86.0, 24.0))
-                            .fill(egui::Color32::from_rgb(45, 45, 48))
-                            .stroke(egui::Stroke::new(
-                                1.0,
-                                egui::Color32::from_rgb(135, 135, 140),
-                            )),
-                        )
-                        .clicked()
-                    {
-                        open_completed = true;
-                    }
-                } else {
-                    let pause_label = if is_active { "Pause" } else { "Start" };
-                    if ui
-                        .add(
-                            egui::Button::new(
-                                egui::RichText::new(pause_label)
-                                    .size(12.0)
-                                    .color(egui::Color32::from_rgb(235, 235, 240)),
-                            )
-                            .min_size(egui::vec2(86.0, 24.0))
-                            .fill(egui::Color32::from_rgb(45, 45, 48))
-                            .stroke(egui::Stroke::new(
-                                1.0,
-                                egui::Color32::from_rgb(135, 135, 140),
-                            )),
-                        )
-                        .clicked()
-                    {
-                        toggle_pause_resume = true;
-                    }
+            } else {
+                let pause_label = if is_active { "Pause" } else { "Start" };
+                if idm_button(ui, primary_rect, pause_label) {
+                    toggle_pause_resume = true;
                 }
-
-                ui.add_space(28.0);
-
-                let close_label = if is_complete { "Close" } else { "Cancel" };
-                if ui
-                    .add(
-                        egui::Button::new(
-                            egui::RichText::new(close_label)
-                                .size(12.0)
-                                .color(egui::Color32::from_rgb(235, 235, 240)),
-                        )
-                        .min_size(egui::vec2(76.0, 24.0))
-                        .fill(egui::Color32::from_rgb(45, 45, 48))
-                        .stroke(egui::Stroke::new(
-                            1.0,
-                            egui::Color32::from_rgb(135, 135, 140),
-                        )),
-                    )
-                    .clicked()
-                {
-                    cancel_download = true;
-                }
-            });
+            }
+            let close_label = if is_complete { "Close" } else { "Cancel" };
+            if idm_button(ui, cancel_rect, close_label) {
+                cancel_download = true;
+            }
 
             // 5. Connection Details Section
             if app.progress_show_details {
-                ui.add_space(8.0);
+                ui.add_space(12.0);
                 ui.vertical_centered(|ui| {
                     ui.label(
                         egui::RichText::new("Start positions and download progress by connections")
@@ -5704,7 +5643,7 @@ fn draw_active_download_progress_dialog(
                             .color(egui::Color32::from_rgb(235, 235, 240)),
                     );
                 });
-                ui.add_space(4.0);
+                ui.add_space(6.0);
 
                 // Build per-connection display rows
                 let max_conn = (app.max_connections as usize).max(6);
@@ -5802,7 +5741,8 @@ fn draw_active_download_progress_dialog(
                 ui.add_space(10.0);
 
                 // Connection Table (N. | Downloaded | Info)
-                let table_h = 152.0;
+                // Header + exactly six 20 px rows (more rows scroll), no half row.
+                let table_h = 23.0 + 6.0 * 20.0 + 3.0;
                 let (table_rect, _) =
                     ui.allocate_exact_size(egui::vec2(536.0, table_h), egui::Sense::hover());
                 let tp = ui.painter();

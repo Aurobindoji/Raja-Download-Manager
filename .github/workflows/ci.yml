@@ -92,4 +92,13 @@ jobs:
       - name: Publish GitHub release
         env:
           GH_TOKEN: ${{ github.token }}
-        run: gh release create "$GITHUB_REF_NAME" dist/* --repo "$GITHUB_REPOSITORY" --generate-notes --title "RAJA $GITHUB_REF_NAME"
+        # The artifact keeps its folders (dist/package, dist/installer), so
+        # upload the files themselves, never the directories.
+        run: |
+          shopt -s nullglob
+          files=(dist/package/*.zip dist/installer/*.exe)
+          if [ "${#files[@]}" -ne 2 ]; then
+            echo "Expected one zip and one installer, found: ${files[*]}"
+            exit 1
+          fi
+          gh release create "$GITHUB_REF_NAME" "${files[@]}" --repo "$GITHUB_REPOSITORY" --generate-notes --title "RAJA $GITHUB_REF_NAME"

@@ -1,5 +1,5 @@
 #define MyAppName "RAJA Download Manager"
-#define MyAppVersion "0.2.7"
+#define MyAppVersion "0.2.8"
 #define MyAppPublisher "RAJA contributors"
 
 [Setup]

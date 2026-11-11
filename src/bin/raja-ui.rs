@@ -121,7 +121,7 @@ struct TorrentFileEntry {
 }
 
 /// Dialog shown alone (without the main window) after a browser request.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 enum CompactView {
     AddDownload,
     Progress,
@@ -150,6 +150,19 @@ struct RajaUi {
     /// yt-dlp downloads video and audio one after the other; this keeps the
     /// real per-stream progress and the combined size it announced up front.
     video_streams: HashMap<i64, VideoStreams>,
+    /// Last error yt-dlp reported for a download, in plain words.
+    download_errors: HashMap<i64, String>,
+    /// True while a dialog is drawn inside its own native window.
+    dialog_in_own_window: bool,
+    /// Title and fitted size of each dialog's own window.
+    own_window_title: HashMap<CompactView, String>,
+    own_window_size: HashMap<u8, egui::Vec2>,
+    own_window_pos: HashMap<u8, egui::Pos2>,
+    /// Dialog windows currently open; a newly opened one is brought to front.
+    own_windows_open: HashMap<u8, u8>,
+    /// When the progress window started waiting for a just-created download
+    /// to appear in the list.
+    progress_target_wait: Option<Instant>,
     children: Vec<RunningProcess>,
     queue: VecDeque<i64>,
     queue_running: bool,
@@ -428,6 +441,13 @@ impl RajaUi {
             downloads: Vec::new(),
             progress_samples: HashMap::new(),
             video_streams: HashMap::new(),
+            download_errors: HashMap::new(),
+            dialog_in_own_window: false,
+            own_window_title: HashMap::new(),
+            own_window_size: HashMap::new(),
+            own_window_pos: HashMap::new(),
+            own_windows_open: HashMap::new(),
+            progress_target_wait: None,
             children: Vec::new(),
             queue: VecDeque::new(),
             queue_running: false,
@@ -748,10 +768,21 @@ impl RajaUi {
             self.status = format!("Video download {download_id} is already running.");
             return false;
         }
-        let arguments = match max_height.map_or_else(
-            || video_job_arguments(download_id, url, output),
-            |height| video_job_arguments_for_height(download_id, url, output, Some(height)),
-        ) {
+        let saved_info = validate_external_url(url).ok().and_then(|url| {
+            let directory = raja_core::video_tools::video_info_directory().ok()?;
+            raja_core::video_tools::fresh_video_info(
+                &directory,
+                &url,
+                raja_core::video_tools::VIDEO_INFO_MAX_AGE,
+            )
+        });
+        let arguments = match max_height
+            .map_or_else(
+                || video_job_arguments(download_id, url, output),
+                |height| video_job_arguments_for_height(download_id, url, output, Some(height)),
+            )
+            .map(|arguments| use_saved_video_info(arguments, saved_info.as_deref()))
+        {
             Ok(arguments) => arguments,
             Err(error) => {
                 self.status = error.clone();
@@ -776,8 +807,15 @@ impl RajaUi {
                     forward_output(stdout, self.output_tx.clone());
                 }
                 if let Some(stderr) = child.stderr.take() {
-                    forward_output(stderr, self.output_tx.clone());
+                    // Tagged with the download id, so its error can be shown
+                    // in that download's progress window.
+                    forward_prefixed_output(
+                        stderr,
+                        format!("RAJA_VIDEO_ERR:{download_id}:"),
+                        self.output_tx.clone(),
+                    );
                 }
+                self.download_errors.remove(&download_id);
                 if let Err(error) =
                     self.update_video_status(download_id, "active", None, None, None)
                 {
@@ -827,6 +865,99 @@ impl RajaUi {
                 self.fail_video_job(download_id, &message);
                 false
             }
+        }
+    }
+
+    /// Draws the "Download File Info" box or the progress window in its own
+    /// native window, independent of the main window (it can be moved
+    /// anywhere and does not bring the main window forward).
+    /// `slot` picks the native window: when "Start Download" turns the
+    /// "Download File Info" box into the progress window, both use slot 0, so
+    /// the same window stays open (and in front) instead of closing and
+    /// reopening behind the main window.
+    fn draw_dialog_in_own_window(&mut self, context: &egui::Context, view: CompactView, slot: u8) {
+        let default_title = match view {
+            CompactView::AddDownload => "Download File Info",
+            CompactView::Progress => "Download progress",
+        };
+        let viewport_id = egui::ViewportId::from_hash_of(("raja-dialog-window", slot));
+        let size = *self.own_window_size.entry(slot).or_insert(COMPACT_ADD_SIZE);
+        let position = *self.own_window_pos.entry(slot).or_insert_with(|| {
+            let monitor = context
+                .input(|i| i.viewport().monitor_size)
+                .unwrap_or(egui::vec2(1280.0, 800.0));
+            ((monitor - size) * 0.5).max(egui::Vec2::ZERO).to_pos2()
+        });
+        let title = self
+            .own_window_title
+            .get(&view)
+            .cloned()
+            .unwrap_or_else(|| default_title.to_owned());
+        let builder = egui::ViewportBuilder::default()
+            .with_title(title)
+            .with_inner_size(size)
+            .with_position(position)
+            .with_resizable(false)
+            .with_minimize_button(true)
+            .with_maximize_button(false);
+        // Frames since this window appeared: keep asking for focus for the
+        // first few, because the native window only exists after the first.
+        let frames_open = self.own_windows_open.entry(slot).or_insert(0);
+        let newly_opened = *frames_open < 6;
+        *frames_open = frames_open.saturating_add(1);
+        let builder = builder.with_active(true);
+        let rect = context.show_viewport_immediate(viewport_id, builder, |ui, class| {
+            let ctx = ui.ctx().clone();
+            if newly_opened && class != egui::ViewportClass::EmbeddedWindow {
+                ctx.send_viewport_cmd(egui::ViewportCommand::Focus);
+            }
+            if class == egui::ViewportClass::EmbeddedWindow {
+                // Platform without native windows: keep the old inner box.
+                return match view {
+                    CompactView::AddDownload => draw_add_download_dialog(self, &ctx),
+                    CompactView::Progress => draw_active_download_progress_dialog(self, &ctx),
+                };
+            }
+            if ctx.input(|i| i.viewport().close_requested()) {
+                match view {
+                    CompactView::AddDownload => self.show_add_dialog = false,
+                    CompactView::Progress => self.show_active_progress_dialog = false,
+                }
+                return None;
+            }
+            egui::CentralPanel::default()
+                .frame(egui::Frame::new().fill(egui::Color32::from_rgb(35, 35, 38)))
+                .show(ui, |_ui| {});
+            self.dialog_in_own_window = true;
+            let rect = match view {
+                CompactView::AddDownload => draw_add_download_dialog(self, &ctx),
+                CompactView::Progress => draw_active_download_progress_dialog(self, &ctx),
+            };
+            self.dialog_in_own_window = false;
+            ctx.request_repaint_after(Duration::from_millis(250));
+            rect
+        });
+        // Fit the native window to the dialog contents.
+        if let Some(rect) = rect {
+            let wanted = egui::vec2(rect.width().ceil(), rect.height().ceil());
+            if (wanted - size).abs().max_elem() > 1.0 {
+                self.own_window_size.insert(slot, wanted);
+            }
+        }
+    }
+
+    /// Removes the saved yt-dlp information for this download's page, if any.
+    fn forget_saved_video_info(&self, download_id: i64) {
+        let Some(url) = self
+            .downloads
+            .iter()
+            .find(|download| download.id == download_id)
+            .and_then(|download| validate_external_url(&download.source_url).ok())
+        else {
+            return;
+        };
+        if let Ok(directory) = raja_core::video_tools::video_info_directory() {
+            let _ = std::fs::remove_file(raja_core::video_tools::video_info_path(&directory, &url));
         }
     }
 
@@ -1388,9 +1519,10 @@ impl RajaUi {
                 // Compact mode: show only the "Download File Info" box, not the main window.
                 self.enter_compact(context, CompactView::AddDownload);
             } else {
-                context.send_viewport_cmd(egui::ViewportCommand::Visible(true));
-                context.send_viewport_cmd(egui::ViewportCommand::Minimized(false));
-                context.send_viewport_cmd(egui::ViewportCommand::Focus);
+                // The main window is open (or minimized): the box opens in its
+                // own window (brought to the front when it appears); leave the
+                // main window exactly as it is.
+                self.own_windows_open.remove(&0);
             }
         }
     }
@@ -1968,6 +2100,15 @@ impl RajaUi {
 
     fn poll_children_and_output(&mut self) {
         while let Ok(line) = self.output_rx.try_recv() {
+            if let Some((download_id, error_line)) = parse_video_error_line(&line) {
+                if let Some(message) = explain_ytdlp_error(error_line) {
+                    self.status = message.clone();
+                    self.download_errors.insert(download_id, message);
+                } else if !error_line.trim().is_empty() {
+                    self.status = error_line.trim().to_owned();
+                }
+                continue;
+            }
             if let Some((download_id, torrent_line)) = parse_torrent_prefixed_line(&line) {
                 if let Some(output_path) = parse_aria2_complete_path(torrent_line) {
                     let _ = self.update_video_output_path(download_id, &output_path);
@@ -2079,7 +2220,18 @@ impl RajaUi {
                     } else {
                         "yt-dlp"
                     };
-                    let message = format!("{tool_name} exited unsuccessfully with {status}");
+                    let message = self
+                        .download_errors
+                        .get(&download_id)
+                        .cloned()
+                        .unwrap_or_else(|| {
+                            format!("{tool_name} exited unsuccessfully with {status}")
+                        });
+                    if kind == ProcessKind::Video {
+                        // The saved stream links may have expired: drop them,
+                        // so Resume extracts the page afresh.
+                        self.forget_saved_video_info(download_id);
+                    }
                     if let Err(error) =
                         self.update_video_status(download_id, "failed", None, None, Some(&message))
                     {
@@ -2325,13 +2477,23 @@ impl eframe::App for RajaUi {
         }
 
         if self.show_add_dialog {
-            draw_add_download_dialog(self, &context);
+            self.draw_dialog_in_own_window(&context, CompactView::AddDownload, 0);
         }
         if self.show_torrent_dialog {
             draw_torrent_dialog(self, &context);
         }
         if self.show_active_progress_dialog {
-            draw_active_download_progress_dialog(self, &context);
+            // Same window as the box it came from, unless a new box is open.
+            let slot = if self.show_add_dialog { 1 } else { 0 };
+            self.draw_dialog_in_own_window(&context, CompactView::Progress, slot);
+        }
+        let slot0_open = self.show_add_dialog || self.show_active_progress_dialog;
+        let slot1_open = self.show_add_dialog && self.show_active_progress_dialog;
+        if !slot0_open {
+            self.own_windows_open.remove(&0);
+        }
+        if !slot1_open {
+            self.own_windows_open.remove(&1);
         }
         if self.show_forget_dialog {
             draw_forget_download_dialog(self, &context);
@@ -4339,7 +4501,7 @@ fn draw_add_download_dialog(app: &mut RajaUi, context: &egui::Context) -> Option
     let mut open = true;
     let mut start_download = false;
     let mut download_later = false;
-    let compact = app.compact_view.is_some();
+    let compact = app.compact_view.is_some() || app.dialog_in_own_window;
 
     let window = egui::Window::new("Download File Info")
         .open(&mut open)
@@ -5236,6 +5398,18 @@ fn draw_active_download_progress_dialog(
         })
         .or(app.selected_download);
 
+    // A download that was just started may not be in the list yet: refresh
+    // and wait (up to 3 s) for it instead of switching to another download.
+    if let Some(id) = target_id
+        && !app.downloads.iter().any(|d| d.id == id)
+    {
+        let waiting_since = *app.progress_target_wait.get_or_insert_with(Instant::now);
+        if waiting_since.elapsed() < Duration::from_secs(3) {
+            app.last_refresh = Instant::now() - Duration::from_secs(2);
+            return None;
+        }
+    }
+    app.progress_target_wait = None;
     let Some(download) = target_id
         .and_then(|id| app.downloads.iter().find(|d| d.id == id).cloned())
         .or_else(|| app.downloads.first().cloned())
@@ -5250,6 +5424,9 @@ fn draw_active_download_progress_dialog(
     let is_active = download.status == "active";
     let is_complete = download.status == "complete";
     let is_paused = download.status == "paused";
+    let error_reason = (download.status == "failed")
+        .then(|| app.download_errors.get(&download.id).cloned())
+        .flatten();
 
     let pct_val = if is_complete {
         100.0
@@ -5284,9 +5461,13 @@ fn draw_active_download_progress_dialog(
 
     #[allow(deprecated)]
     let win_id = egui::Id::new("active-download-progress-window");
-    let compact = app.compact_view.is_some();
-    if compact {
+    let compact = app.compact_view.is_some() || app.dialog_in_own_window;
+    if app.compact_view.is_some() {
         app.set_compact_title(context, window_title.clone());
+    }
+    if app.dialog_in_own_window {
+        app.own_window_title
+            .insert(CompactView::Progress, window_title.clone());
     }
     let window = egui::Window::new(window_title)
         .id(win_id)
@@ -5389,8 +5570,14 @@ fn draw_active_download_progress_dialog(
                 tx += w + 1.0;
             }
 
-            // 2. Main Tab Content Box
-            let box_h = 152.0;
+            // 2. Main Tab Content Box (taller when an error reason is shown)
+            let box_h = if error_reason.is_some()
+                && app.progress_dialog_tab == ProgressDialogTab::DownloadStatus
+            {
+                190.0
+            } else {
+                152.0
+            };
             let (box_rect, _) =
                 ui.allocate_exact_size(egui::vec2(536.0, box_h), egui::Sense::hover());
             ui.painter().rect_filled(box_rect, 0.0, box_bg);
@@ -5503,6 +5690,18 @@ fn draw_active_download_progress_dialog(
                     );
                     y += 19.0;
                     row(y, "Status", status_msg, value_x);
+                    if let Some(reason) = error_reason.as_deref() {
+                        // Why it failed, wrapped under the status line.
+                        let galley = painter.layout(
+                            reason.to_owned(),
+                            egui::FontId::proportional(12.0),
+                            egui::Color32::from_rgb(255, 150, 140),
+                            content_rect.right() - value_x,
+                        );
+                        let reason_height = galley.size().y;
+                        painter.galley(egui::pos2(value_x, y + 9.0), galley, value_color);
+                        y += reason_height + 4.0;
+                    }
                     y += 27.0;
                     for (lbl, val) in [
                         ("File size", size_str.as_str()),
@@ -6916,6 +7115,10 @@ fn video_extraction_arguments_for_height(
         "--continue".to_owned(),
         "--no-overwrites".to_owned(),
         "--progress".to_owned(),
+        // Fragmented (DASH/HLS) streams: fetch 8 pieces at a time instead of
+        // one after another.
+        "--concurrent-fragments".to_owned(),
+        "8".to_owned(),
         "--format".to_owned(),
         format,
     ];
@@ -6991,6 +7194,17 @@ fn video_job_arguments_for_height(
     Ok(arguments)
 }
 
+/// Replaces the page URL (the last argument) with `--load-info-json <file>`
+/// when the browser extension already saved yt-dlp's information for this
+/// page, so yt-dlp starts downloading without extracting the page again.
+fn use_saved_video_info(mut arguments: Vec<String>, info: Option<&std::path::Path>) -> Vec<String> {
+    if let Some(info) = info.and_then(std::path::Path::to_str) {
+        arguments.pop();
+        arguments.extend(["--load-info-json".to_owned(), info.to_owned()]);
+    }
+    arguments
+}
+
 fn parse_launch_url(
     arguments: impl IntoIterator<Item = std::ffi::OsString>,
 ) -> Result<Option<String>, String> {
@@ -7049,19 +7263,16 @@ fn validate_external_url(url: &str) -> Result<String, String> {
 }
 
 fn forward_output(reader: impl std::io::Read + Send + 'static, sender: Sender<String>) {
-    std::thread::spawn(move || {
-        for line in BufReader::new(reader).lines() {
-            match line {
-                Ok(line) => {
-                    let _ = sender.send(line);
-                }
-                Err(error) => {
-                    let _ = sender.send(format!("Could not read Raja output: {error}"));
-                    break;
-                }
-            }
-        }
-    });
+    forward_prefixed_output(reader, String::new(), sender);
+}
+
+/// Splits tool output into lines without ever giving up on bad bytes: tools
+/// such as yt-dlp can print text in the console code page, and the very line
+/// that explains an error used to stop the reader ("not valid UTF-8").
+fn lossy_lines(bytes: &[u8]) -> String {
+    let line = bytes.strip_suffix(b"\n").unwrap_or(bytes);
+    let line = line.strip_suffix(b"\r").unwrap_or(line);
+    String::from_utf8_lossy(line).into_owned()
 }
 
 fn forward_prefixed_output(
@@ -7070,13 +7281,13 @@ fn forward_prefixed_output(
     sender: Sender<String>,
 ) {
     std::thread::spawn(move || {
-        for line in BufReader::new(reader).lines() {
+        for line in BufReader::new(reader).split(b'\n') {
             match line {
-                Ok(line) => {
-                    let _ = sender.send(format!("{prefix}{line}"));
+                Ok(bytes) => {
+                    let _ = sender.send(format!("{prefix}{}", lossy_lines(&bytes)));
                 }
                 Err(error) => {
-                    let _ = sender.send(format!("Could not read torrent output: {error}"));
+                    let _ = sender.send(format!("Could not read tool output: {error}"));
                     break;
                 }
             }
@@ -8321,6 +8532,38 @@ fn resolve_reported_video_path(reported: &str) -> String {
         .unwrap_or_else(|| reported.to_owned())
 }
 
+/// `RAJA_VIDEO_ERR:<id>:<yt-dlp stderr line>`
+fn parse_video_error_line(line: &str) -> Option<(i64, &str)> {
+    let rest = line.strip_prefix("RAJA_VIDEO_ERR:")?;
+    let (download_id, text) = rest.split_once(':')?;
+    Some((download_id.parse().ok()?, text))
+}
+
+/// Turns a yt-dlp `ERROR:` line into a short message a user can act on.
+/// Returns `None` for lines that are not errors (warnings, progress).
+fn explain_ytdlp_error(line: &str) -> Option<String> {
+    let error = line.trim().strip_prefix("ERROR:")?.trim();
+    let lower = error.to_ascii_lowercase();
+    let message = if lower.contains("confirm you") && lower.contains("not a bot") {
+        "YouTube is asking to confirm this is not a bot (too many downloads from this \
+         connection). Wait a while, then press Start again."
+            .to_owned()
+    } else if lower.contains("http error 403") {
+        "The video server refused the link (HTTP 403). Press Start to try again.".to_owned()
+    } else if lower.contains("private video") || lower.contains("video unavailable") {
+        "This video is private or no longer available.".to_owned()
+    } else {
+        // "[youtube] abc123: message" -> "message"
+        let text = error
+            .split_once("]")
+            .map(|(_, rest)| rest.trim())
+            .map(|rest| rest.split_once(": ").map_or(rest, |(_, message)| message))
+            .unwrap_or(error);
+        text.chars().take(160).collect()
+    };
+    Some(message)
+}
+
 fn parse_video_output_line(line: &str) -> Option<(i64, String)> {
     let output = line.strip_prefix("RAJA_OUTPUT:")?;
     let (download_id, output_path) = output.split_once(':')?;
@@ -8547,9 +8790,10 @@ fn render_3d_app_icon(size: usize) -> Vec<u8> {
 mod tests {
     use super::{
         DownloadCategory, ProgressSample, VideoStreams, browser_suggested_filename,
-        format_duration, last_attempt_label, parse_launch_url, parse_video_output_line,
-        parse_video_progress_line, parse_video_size_line, queueable_download_ids,
-        suggested_filename, time_left_label, transfer_rate_label, video_extraction_arguments,
+        explain_ytdlp_error, format_duration, last_attempt_label, lossy_lines, parse_launch_url,
+        parse_video_error_line, parse_video_output_line, parse_video_progress_line,
+        parse_video_size_line, queueable_download_ids, suggested_filename, time_left_label,
+        transfer_rate_label, use_saved_video_info, video_extraction_arguments,
         video_extraction_arguments_for_height, video_job_arguments, video_output_template,
     };
     use raja_core::storage::DownloadSummary;
@@ -8620,6 +8864,8 @@ mod tests {
                 "--continue",
                 "--no-overwrites",
                 "--progress",
+                "--concurrent-fragments",
+                "8",
                 "--format",
                 "bestvideo[height<=1080]+bestaudio/best[height<=1080]/best",
                 "--format-sort",
@@ -8633,6 +8879,55 @@ mod tests {
                 "https://example.com/watch?v=clip"
             ]
         );
+    }
+
+    #[test]
+    fn tool_output_lines_survive_invalid_utf8() {
+        // yt-dlp's bot-check line with a cp1252 apostrophe (0x92).
+        let line = b"ERROR: [youtube] x: Sign in to confirm you\x92re not a bot\r\n";
+        let text = lossy_lines(line);
+        assert!(text.starts_with("ERROR: [youtube] x: Sign in to confirm you"));
+        assert!(text.ends_with("re not a bot"));
+        assert!(explain_ytdlp_error(&text).unwrap().contains("not a bot"));
+    }
+
+    #[test]
+    fn explains_ytdlp_errors_in_plain_words() {
+        let bot = explain_ytdlp_error(
+            "ERROR: [youtube] pqvHf-2AaL0: Sign in to confirm you\u{2019}re not a bot. This helps",
+        )
+        .unwrap();
+        assert!(
+            bot.contains("not a bot") && bot.contains("Start again"),
+            "{bot}"
+        );
+        assert_eq!(
+            explain_ytdlp_error("ERROR: [youtube] abc: Something odd happened").as_deref(),
+            Some("Something odd happened")
+        );
+        assert_eq!(explain_ytdlp_error("WARNING: slow"), None);
+        assert_eq!(
+            parse_video_error_line("RAJA_VIDEO_ERR:13:ERROR: boom"),
+            Some((13, "ERROR: boom"))
+        );
+    }
+
+    #[test]
+    fn saved_video_info_replaces_the_page_url() {
+        let arguments =
+            video_job_arguments(9, "https://example.com/watch?v=clip", Path::new("clip.mp4"))
+                .unwrap();
+        let with_info = use_saved_video_info(
+            arguments.clone(),
+            Some(Path::new(r"C:\Raja\video-info\ab.json")),
+        );
+        assert_eq!(with_info.len(), arguments.len() + 1);
+        assert!(!with_info.contains(&"https://example.com/watch?v=clip".to_owned()));
+        assert_eq!(
+            &with_info[with_info.len() - 2..],
+            ["--load-info-json", r"C:\Raja\video-info\ab.json"]
+        );
+        assert_eq!(use_saved_video_info(arguments.clone(), None), arguments);
     }
 
     #[test]

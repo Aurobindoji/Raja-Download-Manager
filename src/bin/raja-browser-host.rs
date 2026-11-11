@@ -190,6 +190,12 @@ fn available_video_heights(url: &str) -> Result<Vec<u32>, String> {
     if heights.is_empty() {
         return Err("No downloadable video formats up to 1080p were found.".to_owned());
     }
+    // Keep the full information: when the user then starts the download,
+    // Raja hands it to yt-dlp instead of asking YouTube a second time.
+    // Saving is only an optimisation, so a failure is ignored.
+    if let Ok(directory) = raja_core::video_tools::video_info_directory() {
+        let _ = raja_core::video_tools::save_video_info(&directory, url, &output.stdout);
+    }
     Ok(heights)
 }
 

@@ -1,6 +1,11 @@
 use std::env;
+use std::fs;
+use std::io;
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::time::Duration;
+
+use sha2::{Digest, Sha256};
 
 pub fn yt_dlp_executable() -> PathBuf {
     let executable = if cfg!(windows) {
@@ -129,6 +134,70 @@ fn winget_tool_directories(local_app_data: &Path) -> Vec<PathBuf> {
     directories
 }
 
+/// Video information older than this is not reused: the stream links inside
+/// it expire after a few hours, so stay well inside that.
+pub const VIDEO_INFO_MAX_AGE: Duration = Duration::from_secs(20 * 60);
+
+/// Folder for the video information yt-dlp already produced while the browser
+/// extension listed the available qualities (`%LOCALAPPDATA%\Raja\video-info`).
+pub fn video_info_directory() -> io::Result<PathBuf> {
+    let database = crate::app::default_database_path()?;
+    let parent = database
+        .parent()
+        .ok_or_else(|| io::Error::other("Raja database path has no parent folder"))?;
+    Ok(parent.join("video-info"))
+}
+
+/// File that holds the saved video information for `url`.
+pub fn video_info_path(directory: &Path, url: &str) -> PathBuf {
+    let digest = Sha256::digest(url.as_bytes());
+    let name: String = digest.iter().map(|byte| format!("{byte:02x}")).collect();
+    directory.join(format!("{name}.json"))
+}
+
+/// Saves yt-dlp's `--dump-single-json` output for `url` so starting the
+/// download can skip a second extraction. Written to a temporary file and
+/// renamed, so a reader never sees half a file. Old entries are removed.
+pub fn save_video_info(directory: &Path, url: &str, json: &[u8]) -> io::Result<PathBuf> {
+    fs::create_dir_all(directory)?;
+    let path = video_info_path(directory, url);
+    let temporary = path.with_extension(format!("{}.tmp", std::process::id()));
+    fs::write(&temporary, json)?;
+    fs::rename(&temporary, &path)?;
+    prune_video_info(directory, VIDEO_INFO_MAX_AGE * 6);
+    Ok(path)
+}
+
+/// Saved video information for `url`, if it exists and is younger than
+/// `max_age`.
+pub fn fresh_video_info(directory: &Path, url: &str, max_age: Duration) -> Option<PathBuf> {
+    let path = video_info_path(directory, url);
+    let age = fs::metadata(&path)
+        .ok()?
+        .modified()
+        .ok()?
+        .elapsed()
+        .unwrap_or(Duration::ZERO);
+    (age <= max_age).then_some(path)
+}
+
+fn prune_video_info(directory: &Path, older_than: Duration) {
+    let Ok(entries) = fs::read_dir(directory) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let old = entry
+            .metadata()
+            .and_then(|metadata| metadata.modified())
+            .ok()
+            .and_then(|modified| modified.elapsed().ok())
+            .is_some_and(|age| age > older_than);
+        if old {
+            let _ = fs::remove_file(entry.path());
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::configure_video_tool_path;
@@ -143,5 +212,32 @@ mod tests {
                 key == "PATH" && value.is_some_and(|path| !path.is_empty())
             })
         );
+    }
+
+    #[test]
+    fn saved_video_info_is_found_only_for_the_same_url_while_fresh() {
+        let directory =
+            std::env::temp_dir().join(format!("raja-video-info-test-{}", std::process::id()));
+        let url = "https://www.youtube.com/watch?v=abc";
+        let saved = super::save_video_info(&directory, url, b"{\"id\":\"abc\"}").unwrap();
+        assert_eq!(std::fs::read(&saved).unwrap(), b"{\"id\":\"abc\"}");
+        assert_eq!(
+            super::fresh_video_info(&directory, url, super::VIDEO_INFO_MAX_AGE),
+            Some(saved.clone())
+        );
+        assert_eq!(
+            super::fresh_video_info(
+                &directory,
+                "https://www.youtube.com/watch?v=other",
+                super::VIDEO_INFO_MAX_AGE
+            ),
+            None
+        );
+        std::thread::sleep(std::time::Duration::from_millis(20));
+        assert_eq!(
+            super::fresh_video_info(&directory, url, std::time::Duration::from_millis(1)),
+            None
+        );
+        let _ = std::fs::remove_dir_all(&directory);
     }
 }

@@ -21,6 +21,7 @@ Most download managers treat speed as the only goal. RAJA treats **"the file on 
 
 - **Desktop UI:** resizable columns, categories (Compressed, Documents, Music, Programs, Video), queues, scheduler, system tray, and a right-click menu with `Open`, `Open with...`, `Open folder`, `Move/Rename`, `Redownload`, `Refresh download address`, `Remove` and `Properties`.
 - **Themes:** View → Theme switches between Dark, Windows 11 Light, Aero Glass and Aero Glass Dark; the glass themes give the Windows 11 title bar a real acrylic (blurred glass) backdrop.
+- **Link Grabber:** Tasks → *Link Grabber* (or right-click a page → *Grab all links with Raja*) lists every link with its name, type and size, filters them by type, and queues or downloads just the ones you tick.
 - **Progress window:** status, size, speed and time left, plus a per-connection view showing where each connection started and how far it has got.
 - **Browser extension:** a **Download this video** quality picker (1080p–360p, MP4/MKV) over HTML5 video players, and a **Download with Raja** item in the right-click menu. Requests from the browser open a small download-info window without bringing up the whole app. It can also take over downloads the browser starts by itself (right-click the Raja toolbar icon to switch this off); if Raja cannot be reached, the browser keeps the download.
 - **Video pages:** extraction through `yt-dlp` + `ffmpeg`, saved in the container you pick (MP4 or MKV), with the real size, speed and time left while video and audio streams download, and titles in any language (including Hindi) kept intact in the saved file name.
@@ -30,8 +31,8 @@ Most download managers treat speed as the only goal. RAJA treats **"the file on 
 ## Quick Start
 
 ### 1. Install or run
-- **Installer:** run `Raja-0.2.8-Setup-x64.exe` (installs to `%LOCALAPPDATA%\Programs\Raja` and registers the browser native-messaging host).
-- **Portable:** extract `Raja-0.2.8-windows-x64.zip` and run `raja-ui.exe`.
+- **Installer:** run `Raja-0.2.9-Setup-x64.exe` (installs to `%LOCALAPPDATA%\Programs\Raja` and registers the browser native-messaging host).
+- **Portable:** extract `Raja-0.2.9-windows-x64.zip` and run `raja-ui.exe`.
 
 ### 2. Load the browser extension (Chrome / Edge / Brave)
 1. Open `chrome://extensions` (or `edge://extensions`) and turn on **Developer mode**.

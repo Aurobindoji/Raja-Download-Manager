@@ -70,6 +70,34 @@ fn handle_request(
         let heights = available_video_heights(parsed.as_str())?;
         return Ok(serde_json::json!({ "ok": true, "heights": heights }));
     }
+    if action == "grab" {
+        // All links of a page for the Link Grabber; only http(s) ones.
+        let links: Vec<String> = value
+            .get("links")
+            .and_then(serde_json::Value::as_array)
+            .map(|links| {
+                links
+                    .iter()
+                    .filter_map(serde_json::Value::as_str)
+                    .filter_map(|link| validate_url(link).ok())
+                    .map(|link| link.to_string())
+                    .take(5000)
+                    .collect()
+            })
+            .unwrap_or_default();
+        let request = serde_json::json!({
+            "url": parsed.as_str(),
+            "kind": "grab",
+            "links": links,
+        });
+        write_inbox_request(inbox, &request)?;
+        if start_ui {
+            start_raja_ui().map_err(|error| error.to_string())?;
+        }
+        return Ok(
+            serde_json::json!({ "ok": true, "message": "Opened in the RAJA Link Grabber." }),
+        );
+    }
     if action != "download" {
         return Err("Unsupported browser request.".to_owned());
     }
@@ -129,7 +157,17 @@ fn handle_request(
         "file_size": file_size,
         "file_name": file_name,
     });
-    let bytes = serde_json::to_vec(&request).map_err(|error| error.to_string())?;
+    write_inbox_request(inbox, &request)?;
+
+    if start_ui {
+        start_raja_ui().map_err(|error| error.to_string())?;
+    }
+    Ok(serde_json::json!({ "ok": true, "message": "Queued in RAJA." }))
+}
+
+/// Writes one request for Raja into its browser inbox.
+fn write_inbox_request(inbox: &std::path::Path, request: &serde_json::Value) -> Result<(), String> {
+    let bytes = serde_json::to_vec(request).map_err(|error| error.to_string())?;
     let timestamp = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map_err(|error| error.to_string())?
@@ -142,12 +180,7 @@ fn handle_request(
         .open(path)
         .map_err(|error| error.to_string())?;
     file.write_all(&bytes).map_err(|error| error.to_string())?;
-    file.sync_all().map_err(|error| error.to_string())?;
-
-    if start_ui {
-        start_raja_ui().map_err(|error| error.to_string())?;
-    }
-    Ok(serde_json::json!({ "ok": true, "message": "Queued in RAJA." }))
+    file.sync_all().map_err(|error| error.to_string())
 }
 
 fn validate_url(url: &str) -> Result<reqwest::Url, String> {

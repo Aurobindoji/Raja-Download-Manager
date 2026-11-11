@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "Raja Download Manager",
-  "version": "0.3.0",
+  "version": "0.3.1",
   "description": "Send links, videos and browser downloads to the RAJA Download Manager.",
   "icons": {
     "16": "icon16.png",

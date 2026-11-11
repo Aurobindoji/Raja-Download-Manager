@@ -1,5 +1,7 @@
 #![cfg_attr(target_os = "windows", windows_subsystem = "windows")]
 
+#[path = "raja_ui/grabber.rs"]
+mod grabber;
 #[path = "raja_ui/theme.rs"]
 mod theme;
 #[cfg(windows)]
@@ -158,6 +160,10 @@ struct RajaUi {
     core_executable: PathBuf,
     downloads: Vec<DownloadSummary>,
     progress_samples: HashMap<i64, ProgressSample>,
+    /// Fill of each progress bar as drawn (eased towards the real value).
+    bar_shown: HashMap<i64, f32>,
+    /// The Link Grabber window and its list.
+    link_grabber: LinkGrabber,
     /// yt-dlp downloads video and audio one after the other; this keeps the
     /// real per-stream progress and the combined size it announced up front.
     video_streams: HashMap<i64, VideoStreams>,
@@ -476,6 +482,8 @@ impl RajaUi {
             core_executable,
             downloads: Vec::new(),
             progress_samples: HashMap::new(),
+            bar_shown: HashMap::new(),
+            link_grabber: LinkGrabber::default(),
             video_streams: HashMap::new(),
             download_errors: HashMap::new(),
             dialog_in_own_window: false,
@@ -1206,6 +1214,106 @@ impl RajaUi {
             .into_owned();
     }
 
+    /// Progress is read about once a second; drawing it as-is makes the bar
+    /// jump. Between readings the bar moves on at the current speed (never
+    /// more than one second ahead of the real figure) and eases smoothly
+    /// towards it, so it flows like IDM's.
+    fn smooth_bar(
+        &mut self,
+        context: &egui::Context,
+        download: &DownloadSummary,
+        real: f32,
+        active: bool,
+    ) -> f32 {
+        let estimate = match (
+            active,
+            download.total_size.filter(|&total| total > 0),
+            self.progress_samples.get(&download.id),
+        ) {
+            (true, Some(total), Some(sample)) => {
+                let rate = sample.bytes_per_second.unwrap_or(0.0).max(0.0);
+                let ahead = sample.changed_at.elapsed().as_secs_f64().min(1.0) * rate;
+                let bytes = sample.durable_bytes as f64 + ahead;
+                ((bytes / total as f64) as f32).clamp(0.0, 1.0).max(real)
+            }
+            _ => real,
+        };
+        let shown = self.bar_shown.entry(download.id).or_insert(real);
+        if !active || estimate + 0.02 < *shown {
+            // Finished, paused, or the real figure is clearly behind: show it.
+            *shown = estimate;
+        } else if estimate > *shown {
+            let dt = context.input(|i| i.stable_dt).clamp(0.0, 0.1);
+            *shown += (estimate - *shown) * (1.0 - (-dt * 8.0).exp());
+        }
+        if active {
+            context.request_repaint_after(Duration::from_millis(33));
+        }
+        shown.clamp(0.0, 1.0)
+    }
+
+    /// Adds the ticked, shown links of the Link Grabber to the download list.
+    /// With `start_now` exactly these downloads start (one after another),
+    /// without also starting older queued or paused downloads.
+    fn queue_grabbed_links(&mut self, start_now: bool) {
+        let chosen: Vec<GrabbedLink> = self
+            .link_grabber
+            .links
+            .iter()
+            .filter(|link| link.selected && self.link_grabber.shows(link))
+            .cloned()
+            .collect();
+        if chosen.is_empty() {
+            self.status = "Tick at least one link first.".to_owned();
+            return;
+        }
+        let mut storage = match Storage::open(&self.database) {
+            Ok(storage) => storage,
+            Err(error) => {
+                self.status = format!("Could not open the download list: {error}");
+                return;
+            }
+        };
+        let mut created = Vec::new();
+        let mut failed = 0;
+        for link in &chosen {
+            // Stored without a trailing "\", like the engine's own entries.
+            let directory =
+                category_directory_path(&self.default_download_directory, link.category)
+                    .trim_end_matches(['\\', '/'])
+                    .to_owned();
+            if std::fs::create_dir_all(&directory).is_err() {
+                failed += 1;
+                continue;
+            }
+            let name = unique_file_name(std::path::Path::new(&directory), &link.name);
+            let result = if link.is_video_page {
+                storage.create_video_download(&link.url, &name, &directory)
+            } else {
+                storage.create_download(&link.url, &name, &directory, link.size)
+            };
+            match result {
+                Ok(id) => created.push(id),
+                Err(_) => failed += 1,
+            }
+        }
+        let grabbed: std::collections::HashSet<&str> =
+            chosen.iter().map(|link| link.url.as_str()).collect();
+        self.link_grabber
+            .links
+            .retain(|link| !grabbed.contains(link.url.as_str()));
+        self.refresh_downloads();
+        self.status = match (created.len(), failed) {
+            (n, 0) => format!("Added {n} link(s) from the Link Grabber."),
+            (n, f) => format!("Added {n} link(s); {f} could not be added."),
+        };
+        if start_now && !created.is_empty() {
+            self.queue = created.into_iter().collect();
+            self.queue_running = true;
+            self.advance_queue();
+        }
+    }
+
     /// Removes the saved yt-dlp information for this download's page, if any.
     fn forget_saved_video_info(&self, download_id: i64) {
         let Some(url) = self
@@ -1700,6 +1808,33 @@ impl RajaUi {
                     continue;
                 }
             };
+            if kind == "grab" {
+                // "Grab all links with Raja" from the browser: open the Link
+                // Grabber in the main window with the page's links.
+                let links: Vec<String> = request
+                    .get("links")
+                    .and_then(serde_json::Value::as_array)
+                    .map(|links| {
+                        links
+                            .iter()
+                            .filter_map(serde_json::Value::as_str)
+                            .filter_map(|link| validate_external_url(link).ok())
+                            .take(grabber::MAX_LINKS)
+                            .collect()
+                    })
+                    .unwrap_or_default();
+                self.link_grabber.add_links(links);
+                self.link_grabber.open = true;
+                self.link_grabber.source_page = Some(url);
+                if self.compact_view.is_some() {
+                    self.leave_compact(context, true);
+                }
+                self.set_main_visible(true);
+                context.send_viewport_cmd(egui::ViewportCommand::Visible(true));
+                context.send_viewport_cmd(egui::ViewportCommand::Minimized(false));
+                context.send_viewport_cmd(egui::ViewportCommand::Focus);
+                continue;
+            }
             let title = request
                 .get("title")
                 .and_then(serde_json::Value::as_str)
@@ -2851,6 +2986,10 @@ impl eframe::App for RajaUi {
         if self.show_update_dialog {
             draw_update_dialog(self, &context);
         }
+        if self.link_grabber.open {
+            self.link_grabber.poll();
+            draw_link_grabber(self, &context);
+        }
         if self.show_properties_dialog {
             draw_properties_dialog(self, &context);
         }
@@ -2888,6 +3027,10 @@ fn draw_menu_bar(app: &mut RajaUi, ui: &mut egui::Ui) {
                     }
                     if ui.button("Add Torrent / Magnet...").clicked() {
                         app.open_torrent_dialog(true);
+                        ui.close();
+                    }
+                    if ui.button("Link Grabber...").clicked() {
+                        app.link_grabber.open = true;
                         ui.close();
                     }
                     if ui.button("Start Queue").clicked() {
@@ -3054,14 +3197,12 @@ fn draw_menu_bar(app: &mut RajaUi, ui: &mut egui::Ui) {
                         ui.close();
                     }
                     ui.label(format!("Version {}", update::current_version()));
+                    ui.label("Free and open-source software (GPL-3.0-only).");
                     ui.separator();
                     if ui.button("Tell a Friend...").clicked() {
                         app.show_tell_friend_dialog = true;
                         ui.close();
                     }
-                });
-                ui.menu_button(menu_title("R", "egistration"), |ui| {
-                    ui.label("Raja is free and open-source software (GPL-3.0-only).");
                 });
             });
         });
@@ -6187,7 +6328,8 @@ fn draw_active_download_progress_dialog(
                 ui.allocate_exact_size(egui::vec2(536.0, 18.0), egui::Sense::hover());
             ui.painter()
                 .rect_filled(prog_rect, 0.0, fixed_rgb(230, 230, 233));
-            let frac = (pct_val as f32 / 100.0).clamp(0.0, 1.0);
+            let real_frac = (pct_val as f32 / 100.0).clamp(0.0, 1.0);
+            let frac = app.smooth_bar(context, &download, real_frac, is_active);
             let bar_inner = prog_rect.shrink(2.0);
             if frac > 0.0 {
                 let fill_rect = egui::Rect::from_min_max(
@@ -7865,6 +8007,400 @@ fn category_directory_path(base_dir: &str, cat: AddFileCategory) -> String {
         s.push('\\');
     }
     s
+}
+
+/// One link in the Link Grabber.
+#[derive(Debug, Clone)]
+struct GrabbedLink {
+    url: String,
+    name: String,
+    category: AddFileCategory,
+    size: Option<u64>,
+    state: GrabState,
+    selected: bool,
+    /// Pages like YouTube: downloaded through the video extractor.
+    is_video_page: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum GrabState {
+    Checking,
+    Ready,
+    WebPage,
+    Unreachable,
+}
+
+/// What the Link Grabber list shows.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum GrabFilter {
+    All,
+    Files(AddFileCategory),
+    WebPages,
+}
+
+impl GrabFilter {
+    fn label(self) -> &'static str {
+        match self {
+            GrabFilter::All => "All links",
+            GrabFilter::Files(category) => category.label(),
+            GrabFilter::WebPages => "Web pages",
+        }
+    }
+}
+
+#[derive(Default)]
+struct LinkGrabber {
+    open: bool,
+    input: String,
+    links: Vec<GrabbedLink>,
+    filter: Option<GrabFilter>,
+    search: String,
+    source_page: Option<String>,
+    receiver: Option<Receiver<(String, Option<LinkInfo>)>>,
+}
+
+impl LinkGrabber {
+    /// Adds new links (known ones are skipped) and starts checking them.
+    fn add_links(&mut self, links: Vec<String>) {
+        let mut to_check = Vec::new();
+        for url in links {
+            if self.links.iter().any(|link| link.url == url) {
+                continue;
+            }
+            let is_video_page = is_likely_video_page_url(&url);
+            // Video pages get Raja's usual "YouTube-<id>.mp4" style name;
+            // other links are named after the file in their address.
+            let name = if is_video_page {
+                browser_suggested_filename(&url, true)
+            } else {
+                sanitize_windows_filename(&grabber::file_name_from_url(&url))
+            };
+            let category = if is_video_page {
+                AddFileCategory::Video
+            } else {
+                AddFileCategory::from_filename(&name)
+            };
+            if !is_video_page {
+                to_check.push(url.clone());
+            }
+            self.links.push(GrabbedLink {
+                url,
+                name,
+                category,
+                size: None,
+                state: if is_video_page {
+                    GrabState::Ready
+                } else {
+                    GrabState::Checking
+                },
+                selected: true,
+                is_video_page,
+            });
+        }
+        if !to_check.is_empty() {
+            let (sender, receiver) = mpsc::channel();
+            // A newer batch replaces the older one's channel; its links that
+            // were still unchecked are simply shown without a size.
+            self.receiver = Some(receiver);
+            grabber::check_links(to_check, probe_link, sender);
+        }
+    }
+
+    fn poll(&mut self) {
+        let Some(receiver) = &self.receiver else {
+            return;
+        };
+        let mut done = false;
+        loop {
+            match receiver.try_recv() {
+                Ok((url, info)) => {
+                    if let Some(link) = self.links.iter_mut().find(|link| link.url == url) {
+                        apply_link_info(link, info);
+                    }
+                }
+                Err(mpsc::TryRecvError::Empty) => break,
+                Err(mpsc::TryRecvError::Disconnected) => {
+                    done = true;
+                    break;
+                }
+            }
+        }
+        if done {
+            self.receiver = None;
+            for link in &mut self.links {
+                if link.state == GrabState::Checking {
+                    link.state = GrabState::Ready;
+                }
+            }
+        }
+    }
+
+    fn shows(&self, link: &GrabbedLink) -> bool {
+        let type_ok = match self.filter.unwrap_or(GrabFilter::All) {
+            GrabFilter::All => true,
+            GrabFilter::Files(category) => {
+                link.state != GrabState::WebPage && link.category == category
+            }
+            GrabFilter::WebPages => link.state == GrabState::WebPage,
+        };
+        let search = self.search.trim().to_lowercase();
+        type_ok
+            && (search.is_empty()
+                || link.name.to_lowercase().contains(&search)
+                || link.url.to_lowercase().contains(&search))
+    }
+}
+
+fn apply_link_info(link: &mut GrabbedLink, info: Option<LinkInfo>) {
+    let Some(info) = info else {
+        link.state = GrabState::Unreachable;
+        link.selected = false;
+        return;
+    };
+    link.size = info.size;
+    if let Some(name) = info.file_name {
+        link.category = AddFileCategory::from_filename(&name);
+        link.name = name;
+    }
+    if info.is_web_page && info.size.is_none() {
+        // A page, not a file: shown, but not ticked.
+        link.state = GrabState::WebPage;
+        link.selected = false;
+    } else {
+        link.state = GrabState::Ready;
+    }
+}
+
+/// `name`, or `name (1)`, `name (2)`... if a file of that name already exists.
+fn unique_file_name(directory: &std::path::Path, name: &str) -> String {
+    if !directory.join(name).exists() {
+        return name.to_owned();
+    }
+    let path = std::path::Path::new(name);
+    let stem = path.file_stem().and_then(|s| s.to_str()).unwrap_or(name);
+    let extension = path.extension().and_then(|e| e.to_str());
+    (1..1000)
+        .map(|n| match extension {
+            Some(ext) => format!("{stem} ({n}).{ext}"),
+            None => format!("{stem} ({n})"),
+        })
+        .find(|candidate| !directory.join(candidate).exists())
+        .unwrap_or_else(|| name.to_owned())
+}
+
+fn draw_link_grabber(app: &mut RajaUi, context: &egui::Context) {
+    let mut open = true;
+    let mut action: Option<&'static str> = None;
+    egui::Window::new("Link Grabber")
+        .open(&mut open)
+        .collapsible(false)
+        .resizable(true)
+        .default_size([860.0, 540.0])
+        .min_size([640.0, 380.0])
+        .pivot(egui::Align2::CENTER_CENTER)
+        .default_pos(context.content_rect().center())
+        .show(context, |ui| {
+            ui.spacing_mut().item_spacing = egui::vec2(8.0, 6.0);
+            if let Some(page) = &app.link_grabber.source_page {
+                ui.label(
+                    egui::RichText::new(format!("Links from: {page}"))
+                        .size(12.0)
+                        .color(rgb(185, 185, 190)),
+                );
+            }
+            ui.horizontal(|ui| {
+                ui.add(
+                    egui::TextEdit::multiline(&mut app.link_grabber.input)
+                        .desired_rows(2)
+                        .desired_width(ui.available_width() - 110.0)
+                        .hint_text("Paste text or links here (Ctrl+V), then press Find links"),
+                );
+                if ui
+                    .add_sized([100.0, 44.0], egui::Button::new("Find links"))
+                    .clicked()
+                {
+                    action = Some("find");
+                }
+            });
+
+            ui.horizontal(|ui| {
+                let current = app.link_grabber.filter.unwrap_or(GrabFilter::All);
+                ui.label("Show");
+                egui::ComboBox::from_id_salt("grabber-filter")
+                    .selected_text(current.label())
+                    .show_ui(ui, |ui| {
+                        let mut choices = vec![GrabFilter::All];
+                        choices.extend(
+                            [
+                                AddFileCategory::Video,
+                                AddFileCategory::Music,
+                                AddFileCategory::Compressed,
+                                AddFileCategory::Programs,
+                                AddFileCategory::Documents,
+                                AddFileCategory::General,
+                            ]
+                            .map(GrabFilter::Files),
+                        );
+                        choices.push(GrabFilter::WebPages);
+                        for choice in choices {
+                            if ui
+                                .selectable_label(current == choice, choice.label())
+                                .clicked()
+                            {
+                                app.link_grabber.filter = Some(choice);
+                            }
+                        }
+                    });
+                ui.label("Search");
+                ui.add(
+                    egui::TextEdit::singleline(&mut app.link_grabber.search).desired_width(180.0),
+                );
+                if ui.button("Tick all shown").clicked() {
+                    action = Some("all");
+                }
+                if ui.button("Untick all").clicked() {
+                    action = Some("none");
+                }
+            });
+
+            let shown: Vec<usize> = (0..app.link_grabber.links.len())
+                .filter(|&i| app.link_grabber.shows(&app.link_grabber.links[i]))
+                .collect();
+            let ticked: Vec<&GrabbedLink> = shown
+                .iter()
+                .map(|&i| &app.link_grabber.links[i])
+                .filter(|link| link.selected)
+                .collect();
+            let total: u64 = ticked.iter().filter_map(|link| link.size).sum();
+            let checking = app
+                .link_grabber
+                .links
+                .iter()
+                .filter(|link| link.state == GrabState::Checking)
+                .count();
+            ui.label(format!(
+                "{} link(s) shown, {} ticked{}{}",
+                shown.len(),
+                ticked.len(),
+                if total > 0 {
+                    format!(", {} known size", format_bytes(total))
+                } else {
+                    String::new()
+                },
+                if checking > 0 {
+                    format!(" - checking {checking}...")
+                } else {
+                    String::new()
+                }
+            ));
+            if checking > 0 {
+                context.request_repaint_after(Duration::from_millis(200));
+            }
+
+            let list_height = (ui.available_height() - 44.0).max(120.0);
+            egui::ScrollArea::both()
+                .id_salt("grabber-list")
+                .max_height(list_height)
+                .auto_shrink([false, false])
+                .show(ui, |ui| {
+                    egui::Grid::new("grabber-grid")
+                        .striped(true)
+                        .num_columns(5)
+                        .spacing([12.0, 4.0])
+                        .show(ui, |ui| {
+                            ui.strong("");
+                            ui.strong("File name");
+                            ui.strong("Type");
+                            ui.strong("Size");
+                            ui.strong("Address");
+                            ui.end_row();
+                            for &i in &shown {
+                                let link = &mut app.link_grabber.links[i];
+                                ui.checkbox(&mut link.selected, "");
+                                ui.label(&link.name);
+                                ui.label(match link.state {
+                                    GrabState::WebPage => "Web page",
+                                    _ if link.is_video_page => "Video page",
+                                    _ => link.category.label(),
+                                });
+                                ui.label(match (link.state, link.size) {
+                                    (GrabState::Checking, _) => "checking...".to_owned(),
+                                    (GrabState::Unreachable, _) => "not reachable".to_owned(),
+                                    (_, Some(size)) => format_bytes(size),
+                                    _ => "unknown".to_owned(),
+                                });
+                                ui.label(
+                                    egui::RichText::new(&link.url)
+                                        .size(11.5)
+                                        .color(rgb(170, 170, 176)),
+                                );
+                                ui.end_row();
+                            }
+                        });
+                });
+
+            ui.add_space(4.0);
+            ui.horizontal(|ui| {
+                ui.label(
+                    egui::RichText::new(format!(
+                        "Saved into category folders under {}",
+                        app.default_download_directory
+                    ))
+                    .size(11.5)
+                    .color(rgb(170, 170, 176)),
+                );
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    if ui.button("Close").clicked() {
+                        action = Some("close");
+                    }
+                    if ui.button("Clear list").clicked() {
+                        action = Some("clear");
+                    }
+                    if ui.button("Add to queue").clicked() {
+                        action = Some("queue");
+                    }
+                    if ui
+                        .add(egui::Button::new(
+                            egui::RichText::new("Download now").strong(),
+                        ))
+                        .clicked()
+                    {
+                        action = Some("start");
+                    }
+                });
+            });
+        });
+    if !open {
+        action = Some("close");
+    }
+    match action {
+        Some("find") => {
+            let links = grabber::extract_links(&app.link_grabber.input);
+            if links.is_empty() {
+                app.status = "No links found in the pasted text.".to_owned();
+            } else {
+                app.link_grabber.input.clear();
+                app.link_grabber.add_links(links);
+            }
+        }
+        Some("all") | Some("none") => {
+            let tick = action == Some("all");
+            let grabber = &mut app.link_grabber;
+            for i in 0..grabber.links.len() {
+                if grabber.shows(&grabber.links[i]) {
+                    grabber.links[i].selected = tick;
+                }
+            }
+        }
+        Some("queue") => app.queue_grabbed_links(false),
+        Some("start") => app.queue_grabbed_links(true),
+        Some("clear") => {
+            app.link_grabber.links.clear();
+            app.link_grabber.source_page = None;
+        }
+        Some("close") => app.link_grabber.open = false,
+        _ => {}
+    }
 }
 
 /// What the server says about a link before downloading it.

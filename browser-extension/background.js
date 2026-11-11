@@ -1,4 +1,5 @@
 const MENU_ID = "raja-download";
+const GRAB_MENU_ID = "raja-grab-links";
 const CAPTURE_MENU_ID = "raja-capture-downloads";
 const CAPTURE_KEY = "captureDownloads";
 // Browser downloads smaller than this stay in the browser (icons, tiny files).
@@ -13,6 +14,11 @@ function createMenus() {
       id: MENU_ID,
       title: "Download with Raja",
       contexts: ["link", "selection", "page"]
+    });
+    chrome.contextMenus.create({
+      id: GRAB_MENU_ID,
+      title: "Grab all links with Raja",
+      contexts: ["page", "link"]
     });
     chrome.storage.local.get({ [CAPTURE_KEY]: true }, (stored) => {
       // Right-click the Raja toolbar icon to switch this on or off.
@@ -30,7 +36,11 @@ function createMenus() {
 chrome.runtime.onInstalled.addListener(createMenus);
 chrome.runtime.onStartup.addListener(createMenus);
 
-chrome.contextMenus.onClicked.addListener((info) => {
+chrome.contextMenus.onClicked.addListener((info, tab) => {
+  if (info.menuItemId === GRAB_MENU_ID) {
+    grabLinks(info.pageUrl, tab);
+    return;
+  }
   if (info.menuItemId === CAPTURE_MENU_ID) {
     chrome.storage.local.set({ [CAPTURE_KEY]: Boolean(info.checked) });
     return;
@@ -111,6 +121,29 @@ chrome.downloads.onDeterminingFilename.addListener((item, suggest) => {
     });
   });
 });
+
+// Collects every link on the page (via the page script) and opens them in
+// Raja's Link Grabber.
+function grabLinks(pageUrl, tab) {
+  const send = (links) => {
+    chrome.runtime.sendNativeMessage("com.raja.browser", {
+      action: "grab",
+      url: pageUrl,
+      links
+    });
+  };
+  if (!tab?.id) {
+    send([]);
+    return;
+  }
+  chrome.tabs.sendMessage(tab.id, { type: "raja-collect-links" }, (response) => {
+    if (chrome.runtime.lastError || !Array.isArray(response?.links)) {
+      send([]);
+      return;
+    }
+    send(response.links);
+  });
+}
 
 function parseHttpUrl(candidate) {
   let url;

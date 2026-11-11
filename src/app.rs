@@ -218,7 +218,18 @@ fn download_one(
     let output_dir = output_parent
         .to_str()
         .ok_or_else(|| invalid_input("output directory must be valid Unicode"))?;
-    let existing = storage.find_resumable_download(output_dir, final_name)?;
+    // Entries made by the add box or Link Grabber store the folder as typed
+    // ("C:\..." or "C:\...\"), the engine stores it canonical ("\\?\C:\...").
+    // Accept every spelling, so a queued entry is continued, not duplicated.
+    let plain_dir = output_dir.strip_prefix(r"\\?\").unwrap_or(output_dir);
+    let with_separator = format!("{plain_dir}{}", std::path::MAIN_SEPARATOR);
+    let mut existing = None;
+    for folder in [output_dir, plain_dir, with_separator.as_str()] {
+        existing = storage.find_resumable_download(folder, final_name)?;
+        if existing.is_some() {
+            break;
+        }
+    }
     // Resume from the same mirror the download started on (its copy has the
     // ETag the saved segments were checked against); otherwise follow the
     // link's redirect once and pin the result for every segment.

@@ -496,6 +496,36 @@
     }
   });
 
+  // "Grab all links with Raja": every distinct http(s) link and media source
+  // on the page, for Raja's Link Grabber.
+  chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
+    if (message?.type !== "raja-collect-links") {
+      return;
+    }
+    const seen = new Set();
+    const links = [];
+    const add = (value) => {
+      if (!value || links.length >= 5000) return;
+      let url;
+      try {
+        url = new URL(value, document.baseURI);
+      } catch {
+        return;
+      }
+      if (url.protocol !== "http:" && url.protocol !== "https:") return;
+      url.hash = "";
+      if (!seen.has(url.href)) {
+        seen.add(url.href);
+        links.push(url.href);
+      }
+    };
+    document.querySelectorAll("a[href]").forEach((a) => add(a.getAttribute("href")));
+    document
+      .querySelectorAll("video[src], audio[src], source[src]")
+      .forEach((media) => add(media.getAttribute("src")));
+    sendResponse({ links });
+  });
+
   shadow.append(style, bar, formatsMenu);
   document.documentElement.append(host);
 

@@ -220,6 +220,10 @@ struct RajaUi {
     progress_open_when_done: bool,
     progress_show_complete_dialog: bool,
     show_forget_dialog: bool,
+    /// Every download selected in the list (Ctrl/Shift+click, Ctrl+A).
+    selected_set: HashSet<i64>,
+    /// Downloads the "Confirm deletion" box is asking about.
+    pending_remove: Vec<i64>,
     delete_files_from_disk_too: bool,
     dont_show_delete_confirm_again: bool,
     double_click_action: DoubleClickAction,
@@ -519,6 +523,8 @@ impl RajaUi {
             progress_open_when_done: false,
             progress_show_complete_dialog: true,
             show_forget_dialog: false,
+            selected_set: HashSet::new(),
+            pending_remove: Vec::new(),
             delete_files_from_disk_too: false,
             dont_show_delete_confirm_again: false,
             double_click_action: DoubleClickAction::OpenFile,
@@ -2443,13 +2449,49 @@ impl RajaUi {
         }
     }
 
+    /// Asks to remove `download_id`, or every selected download when it is
+    /// part of a multiple selection. Unfinished downloads always get the
+    /// warning, even with "Don't show this dialog again".
     fn request_remove_download(&mut self, download_id: i64) {
         self.selected_download = Some(download_id);
-        if self.dont_show_delete_confirm_again {
-            let del_disk = self.delete_files_from_disk_too;
-            self.execute_remove_download(download_id, del_disk);
+        self.pending_remove =
+            if self.selected_set.contains(&download_id) && self.selected_set.len() > 1 {
+                self.downloads
+                    .iter()
+                    .map(|download| download.id)
+                    .filter(|id| self.selected_set.contains(id))
+                    .collect()
+            } else {
+                vec![download_id]
+            };
+        let unfinished = self.unfinished_in(&self.pending_remove);
+        if self.dont_show_delete_confirm_again && unfinished == 0 {
+            self.remove_pending_downloads(self.delete_files_from_disk_too);
         } else {
             self.show_forget_dialog = true;
+        }
+    }
+
+    fn unfinished_in(&self, ids: &[i64]) -> usize {
+        self.downloads
+            .iter()
+            .filter(|download| ids.contains(&download.id) && download.status != "complete")
+            .count()
+    }
+
+    fn remove_pending_downloads(&mut self, delete_from_disk: bool) {
+        let ids = std::mem::take(&mut self.pending_remove);
+        let count = ids.len();
+        for id in ids {
+            self.execute_remove_download(id, delete_from_disk);
+            self.selected_set.remove(&id);
+        }
+        if count > 1 {
+            self.status = if delete_from_disk {
+                format!("Deleted {count} downloads from the list and the hard disk.")
+            } else {
+                format!("Removed {count} downloads from the list.")
+            };
         }
     }
 
@@ -2470,6 +2512,12 @@ impl RajaUi {
             let part_path = PathBuf::from(format!("{}.raja.part", download.output_path.display()));
             if part_path.is_file() {
                 let _ = std::fs::remove_file(&part_path);
+            }
+            // The engine's partly downloaded data (`<name>.ndpart`): useless
+            // once the download is removed, and it can be gigabytes.
+            let engine_part = PathBuf::from(format!("{}.ndpart", download.output_path.display()));
+            if download.status != "complete" && engine_part.is_file() {
+                let _ = std::fs::remove_file(&engine_part);
             }
             let aria_path = PathBuf::from(format!("{}.aria2", download.output_path.display()));
             if aria_path.is_file() {
@@ -3118,7 +3166,9 @@ fn draw_menu_bar(app: &mut RajaUi, ui: &mut egui::Ui) {
                         .add_enabled(can_forget, egui::Button::new("Delete"))
                         .clicked()
                     {
-                        app.show_forget_dialog = true;
+                        if let Some(id) = app.selected_download {
+                            app.request_remove_download(id);
+                        }
                         ui.close();
                     }
                     if ui
@@ -4362,8 +4412,8 @@ fn draw_download_table(app: &mut RajaUi, ui: &mut egui::Ui) {
             egui::pos2((cx + w).min(header_rect.right()), header_rect.bottom()),
         );
         hp.with_clip_rect(cell_rect).text(
-            egui::pos2(cell_rect.left() + 6.0, cell_rect.center().y),
-            egui::Align2::LEFT_CENTER,
+            cell_rect.center(),
+            egui::Align2::CENTER_CENTER,
             *title,
             egui::FontId::proportional(12.0),
             rgb(228, 228, 232),
@@ -4393,6 +4443,21 @@ fn draw_download_table(app: &mut RajaUi, ui: &mut egui::Ui) {
         .filter(|download| app.category.matches(download))
         .cloned()
         .collect::<Vec<_>>();
+
+    // Ctrl+A: select every download shown in this category.
+    let context = ui.ctx().clone();
+    if !context.egui_wants_keyboard_input()
+        && context.input(|i| i.modifiers.command && i.key_pressed(egui::Key::A))
+    {
+        app.selected_set = downloads.iter().map(|download| download.id).collect();
+        if app
+            .selected_download
+            .is_none_or(|id| !app.selected_set.contains(&id))
+        {
+            app.selected_download = downloads.first().map(|download| download.id);
+        }
+    }
+    let modifiers = context.input(|i| i.modifiers);
 
     let body_rect =
         egui::Rect::from_min_max(egui::pos2(inner.left(), header_rect.bottom()), inner.max);
@@ -4430,7 +4495,8 @@ fn draw_download_table(app: &mut RajaUi, ui: &mut egui::Ui) {
                 let rp = ui.painter();
 
                 if let Some(download) = downloads.get(row_idx) {
-                    let selected = app.selected_download == Some(download.id);
+                    let selected = app.selected_set.contains(&download.id)
+                        || app.selected_download == Some(download.id);
                     if selected {
                         rp.rect_filled(row_rect, 0.0, rgb(56, 78, 108));
                     } else if response.hovered() {
@@ -4438,7 +4504,34 @@ fn draw_download_table(app: &mut RajaUi, ui: &mut egui::Ui) {
                     }
 
                     if response.clicked() {
-                        app.selected_download = Some(download.id);
+                        // Like Windows Explorer: Ctrl toggles, Shift selects a
+                        // range from the last clicked download, plain selects one.
+                        if modifiers.command {
+                            if !app.selected_set.remove(&download.id) {
+                                app.selected_set.insert(download.id);
+                            }
+                            if let Some(previous) = app.selected_download
+                                && !modifiers.shift
+                                && app.selected_set.len() == 1
+                                && !app.selected_set.contains(&previous)
+                            {
+                                app.selected_set.insert(previous);
+                            }
+                        } else if modifiers.shift
+                            && let Some(anchor) = app.selected_download
+                            && let Some(from) = downloads.iter().position(|d| d.id == anchor)
+                        {
+                            let (a, b) = (from.min(row_idx), from.max(row_idx));
+                            app.selected_set = downloads[a..=b]
+                                .iter()
+                                .map(|download| download.id)
+                                .collect();
+                        } else {
+                            app.selected_set = HashSet::from([download.id]);
+                        }
+                        if !modifiers.shift {
+                            app.selected_download = Some(download.id);
+                        }
                     }
                     if response.double_clicked() {
                         app.selected_download = Some(download.id);
@@ -4464,6 +4557,9 @@ fn draw_download_table(app: &mut RajaUi, ui: &mut egui::Ui) {
                         ui.set_min_width(215.0);
                         ui.spacing_mut().item_spacing = egui::vec2(0.0, 3.0);
                         ui.spacing_mut().button_padding = egui::vec2(10.0, 3.5);
+                        if !app.selected_set.contains(&download.id) {
+                            app.selected_set = HashSet::from([download.id]);
+                        }
                         app.selected_download = Some(download.id);
 
                         let is_complete = download.status == "complete";
@@ -6675,16 +6771,14 @@ fn draw_active_download_progress_dialog(
 }
 
 fn draw_forget_download_dialog(app: &mut RajaUi, context: &egui::Context) {
-    let Some(download) = app
-        .downloads
-        .iter()
-        .find(|download| Some(download.id) == app.selected_download)
-    else {
+    app.pending_remove
+        .retain(|id| app.downloads.iter().any(|download| download.id == *id));
+    if app.pending_remove.is_empty() {
         app.show_forget_dialog = false;
         return;
-    };
-
-    let download_id = download.id;
+    }
+    let count = app.pending_remove.len();
+    let unfinished = app.unfinished_in(&app.pending_remove);
     let mut open = true;
     let mut confirm_yes = false;
     let mut confirm_no = false;
@@ -6702,12 +6796,34 @@ fn draw_forget_download_dialog(app: &mut RajaUi, context: &egui::Context) {
         )
         .show(context, |ui| {
             ui.label(
-                egui::RichText::new(
-                    "Are you sure you want to delete the selected downloads from the Raja download list?",
-                )
+                egui::RichText::new(if count == 1 {
+                    "Are you sure you want to delete the selected download from the Raja download list?"
+                        .to_owned()
+                } else {
+                    format!(
+                        "Are you sure you want to delete the {count} selected downloads from the Raja download list?"
+                    )
+                })
                 .size(12.5)
                 .color(rgb(235, 235, 240)),
             );
+            if unfinished > 0 {
+                ui.add_space(8.0);
+                ui.label(
+                    egui::RichText::new(if count == 1 {
+                        "Warning: this download is not finished. Its partly downloaded data \
+                         will be deleted and it cannot be resumed."
+                            .to_owned()
+                    } else {
+                        format!(
+                            "Warning: {unfinished} of them are not finished. Their partly \
+                             downloaded data will be deleted and they cannot be resumed."
+                        )
+                    })
+                    .size(12.5)
+                    .color(rgb(255, 150, 140)),
+                );
+            }
             ui.add_space(12.0);
             ui.horizontal(|ui| {
                 ui.add_space(12.0);
@@ -6769,12 +6885,13 @@ fn draw_forget_download_dialog(app: &mut RajaUi, context: &egui::Context) {
 
     if !open || confirm_no {
         app.show_forget_dialog = false;
+        app.pending_remove.clear();
         return;
     }
     if confirm_yes {
         let del_disk = app.delete_files_from_disk_too;
         app.show_forget_dialog = false;
-        app.execute_remove_download(download_id, del_disk);
+        app.remove_pending_downloads(del_disk);
     }
 }
 

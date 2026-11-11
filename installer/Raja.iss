@@ -14,10 +14,13 @@ PrivilegesRequired=lowest
 ArchitecturesInstallIn64BitMode=x64compatible
 OutputDir=..\target\installer
 OutputBaseFilename=Raja-{#MyAppVersion}-Setup-x64
-UninstallDisplayIcon={app}\raja-ui.exe
+SetupIconFile=raja.ico
+UninstallDisplayIcon={app}\raja.ico
 Compression=lzma2
 SolidCompression=yes
 WizardStyle=modern
+CloseApplications=no
+RestartApplications=no
 LicenseFile=..\LICENSE
 SetupLogging=yes
 
@@ -32,13 +35,15 @@ Name: "browserextension"; Description: "Open browser extension loading instructi
 Source: "..\target\release\raja-ui.exe"; DestDir: "{app}"; Flags: ignoreversion
 Source: "..\target\release\raja-core.exe"; DestDir: "{app}"; Flags: ignoreversion
 Source: "..\target\release\raja-browser-host.exe"; DestDir: "{app}"; Flags: ignoreversion
+Source: "raja.ico"; DestDir: "{app}"; Flags: ignoreversion
+Source: "raja.ico"; DestDir: "{app}"; DestName: "raja-shield.ico"; Flags: ignoreversion
 Source: "..\README.md"; DestDir: "{app}"; Flags: ignoreversion
 Source: "..\LICENSE"; DestDir: "{app}"; Flags: ignoreversion
 Source: "..\browser-extension\*"; DestDir: "{app}\browser-extension"; Flags: ignoreversion recursesubdirs createallsubdirs
 
 [Icons]
-Name: "{autoprograms}\{#MyAppName}"; Filename: "{app}\raja-ui.exe"
-Name: "{autodesktop}\RAJA"; Filename: "{app}\raja-ui.exe"; Tasks: desktopicon
+Name: "{autoprograms}\{#MyAppName}"; Filename: "{app}\raja-ui.exe"; IconFilename: "{app}\raja-shield.ico"
+Name: "{autodesktop}\RAJA"; Filename: "{app}\raja-ui.exe"; IconFilename: "{app}\raja-shield.ico"; Tasks: desktopicon
 
 [Run]
 Filename: "{app}\raja-ui.exe"; Description: "Launch RAJA Download Manager"; Flags: postinstall nowait skipifsilent
@@ -98,8 +103,12 @@ function PrepareToInstall(var NeedsRestart: Boolean): String;
 var
   ExistingCommand: String;
   RajaCommand: String;
+  ResultCode: Integer;
 begin
   Result := '';
+  Exec(ExpandConstant('{sys}\taskkill.exe'), '/F /IM raja-browser-host.exe /T', '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
+  Exec(ExpandConstant('{sys}\taskkill.exe'), '/F /IM raja-ui.exe /T', '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
+  Exec(ExpandConstant('{sys}\taskkill.exe'), '/F /IM raja-core.exe /T', '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
   RajaCommand := '"' + ExpandConstant('{app}\raja-ui.exe') + '" "%1"';
   if RegQueryStringValue(
     HKEY_CURRENT_USER,

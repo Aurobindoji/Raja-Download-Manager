@@ -57,101 +57,27 @@ impl TrayHandle {
     }
 }
 
+const SHIELD_64_RGBA: &[u8] = include_bytes!("tray_shield_64.rgba");
+
 fn raja_icon() -> Result<Icon, String> {
-    const SIZE: usize = 32;
-    let mut pixels = vec![0u8; SIZE * SIZE * 4];
-    for y in 0..SIZE {
-        for x in 0..SIZE {
-            let dx = x as isize - 16;
-            let dy = y as isize - 16;
-            if dx * dx + dy * dy <= 15 * 15 {
-                let index = (y * SIZE + x) * 4;
-                pixels[index..index + 4].copy_from_slice(&[233, 104, 36, 255]);
-            }
+    const SIZE: usize = 64;
+    let pixels = render_3d_tray_icon(SIZE);
+    Icon::from_rgba(pixels, SIZE as u32, SIZE as u32).map_err(|error| error.to_string())
+}
+
+pub fn render_3d_tray_icon(size: usize) -> Vec<u8> {
+    if size == 64 && SHIELD_64_RGBA.len() == 64 * 64 * 4 {
+        return SHIELD_64_RGBA.to_vec();
+    }
+    let mut pixels = vec![0u8; size * size * 4];
+    for py in 0..size {
+        let sy = (py * 64 / size.max(1)).min(63);
+        for px in 0..size {
+            let sx = (px * 64 / size.max(1)).min(63);
+            let src_idx = (sy * 64 + sx) * 4;
+            let dst_idx = (py * size + px) * 4;
+            pixels[dst_idx..dst_idx + 4].copy_from_slice(&SHIELD_64_RGBA[src_idx..src_idx + 4]);
         }
     }
-    for (x, y) in [
-        (10, 8),
-        (11, 8),
-        (12, 8),
-        (13, 8),
-        (14, 8),
-        (15, 8),
-        (16, 8),
-        (17, 8),
-        (18, 8),
-        (19, 8),
-        (20, 8),
-        (10, 9),
-        (20, 9),
-        (10, 10),
-        (20, 10),
-        (10, 11),
-        (11, 11),
-        (12, 11),
-        (13, 11),
-        (14, 11),
-        (15, 11),
-        (16, 11),
-        (17, 11),
-        (18, 11),
-        (19, 11),
-        (10, 12),
-        (11, 12),
-        (19, 12),
-        (20, 12),
-        (10, 13),
-        (11, 13),
-        (19, 13),
-        (20, 13),
-        (10, 14),
-        (11, 14),
-        (12, 14),
-        (13, 14),
-        (14, 14),
-        (15, 14),
-        (16, 14),
-        (17, 14),
-        (18, 14),
-        (19, 14),
-        (20, 14),
-        (10, 15),
-        (11, 15),
-        (12, 15),
-        (13, 15),
-        (14, 15),
-        (15, 15),
-        (16, 15),
-        (17, 15),
-        (18, 15),
-        (19, 15),
-        (20, 15),
-        (12, 16),
-        (13, 16),
-        (18, 16),
-        (19, 16),
-        (13, 17),
-        (14, 17),
-        (17, 17),
-        (18, 17),
-        (14, 18),
-        (15, 18),
-        (16, 18),
-        (17, 18),
-        (15, 19),
-        (16, 19),
-        (16, 20),
-        (17, 20),
-        (17, 21),
-        (18, 21),
-        (18, 22),
-        (19, 22),
-        (19, 23),
-        (20, 23),
-        (20, 24),
-    ] {
-        let index = (y * SIZE + x) * 4;
-        pixels[index..index + 4].copy_from_slice(&[255, 255, 255, 255]);
-    }
-    Icon::from_rgba(pixels, SIZE as u32, SIZE as u32).map_err(|error| error.to_string())
+    pixels
 }

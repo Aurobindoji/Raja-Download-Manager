@@ -28,6 +28,48 @@ pub fn yt_dlp_executable() -> PathBuf {
     PathBuf::from(executable)
 }
 
+pub fn aria2c_executable() -> PathBuf {
+    let executable = if cfg!(windows) {
+        "aria2c.exe"
+    } else {
+        "aria2c"
+    };
+    if let Ok(current_exe) = env::current_exe()
+        && let Some(dir) = current_exe.parent()
+    {
+        let sibling = dir.join(executable);
+        if sibling.is_file() {
+            return sibling;
+        }
+    }
+    if let Some(path) = find_in_path(executable) {
+        return path;
+    }
+
+    #[cfg(windows)]
+    if let Some(local_app_data) = env::var_os("LOCALAPPDATA") {
+        let root = PathBuf::from(local_app_data)
+            .join("Microsoft")
+            .join("WinGet")
+            .join("Packages")
+            .join("aria2.aria2_Microsoft.Winget.Source_8wekyb3d8bbwe");
+        let direct = root.join(executable);
+        if direct.is_file() {
+            return direct;
+        }
+        if let Ok(entries) = std::fs::read_dir(&root) {
+            for entry in entries.flatten() {
+                let candidate = entry.path().join(executable);
+                if candidate.is_file() {
+                    return candidate;
+                }
+            }
+        }
+    }
+
+    PathBuf::from(executable)
+}
+
 pub fn configure_video_tool_path(command: &mut Command) {
     let mut paths = env::var_os("PATH")
         .map(|path| env::split_paths(&path).collect::<Vec<_>>())

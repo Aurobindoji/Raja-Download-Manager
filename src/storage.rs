@@ -483,7 +483,11 @@ impl Storage {
         let updated = transaction.execute(
             "UPDATE downloads
              SET status = ?1, external_bytes = COALESCE(?2, external_bytes),
-                 total_size = COALESCE(?3, total_size),
+                 total_size = CASE
+                     WHEN ?3 IS NOT NULL THEN ?3
+                     WHEN total_size IS NOT NULL AND ?2 IS NOT NULL AND total_size < ?2 THEN NULL
+                     ELSE total_size
+                 END,
                  last_attempt_at = CASE
                      WHEN ?1 = 'active' AND status != 'active' THEN ?4
                      ELSE last_attempt_at END,
@@ -638,6 +642,85 @@ impl Storage {
             return Err(StorageError::DownloadNotForgettable(download_id));
         }
         transaction.commit()?;
+        Ok(())
+    }
+
+    pub fn remove_download(&mut self, download_id: i64) -> Result<(), StorageError> {
+        let transaction = self
+            .connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let deleted =
+            transaction.execute("DELETE FROM downloads WHERE id = ?1", [download_id])?;
+        if deleted == 0 {
+            return Err(StorageError::DownloadNotFound(download_id));
+        }
+        transaction.commit()?;
+        Ok(())
+    }
+
+    pub fn update_download_output(
+        &mut self,
+        download_id: i64,
+        file_name: &str,
+        output_dir: &str,
+    ) -> Result<(), StorageError> {
+        validate_nonempty(file_name, "file name")?;
+        validate_nonempty(output_dir, "output directory")?;
+        let updated = self.connection.execute(
+            "UPDATE downloads SET file_name = ?1, output_dir = ?2 WHERE id = ?3",
+            params![file_name, output_dir, download_id],
+        )?;
+        if updated == 0 {
+            return Err(StorageError::DownloadNotFound(download_id));
+        }
+        Ok(())
+    }
+
+    pub fn update_download_url(
+        &mut self,
+        download_id: i64,
+        new_url: &str,
+    ) -> Result<(), StorageError> {
+        validate_nonempty(new_url, "source URL")?;
+        let transaction = self
+            .connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let updated = transaction.execute(
+            "UPDATE downloads SET source_url = ?1 WHERE id = ?2",
+            params![new_url, download_id],
+        )?;
+        if updated == 0 {
+            return Err(StorageError::DownloadNotFound(download_id));
+        }
+        transaction.execute(
+            "UPDATE sources SET url = ?1 WHERE download_id = ?2 AND ordinal = 0",
+            params![new_url, download_id],
+        )?;
+        transaction.commit()?;
+        Ok(())
+    }
+
+    pub fn set_download_queue_status(
+        &mut self,
+        download_id: i64,
+        queued: bool,
+    ) -> Result<(), StorageError> {
+        let new_status = if queued { "queued" } else { "paused" };
+        let updated = self.connection.execute(
+            "UPDATE downloads SET status = ?1
+             WHERE id = ?2 AND status IN ('queued', 'paused', 'failed')",
+            params![new_status, download_id],
+        )?;
+        if updated == 0 {
+            let exists: bool = self.connection.query_row(
+                "SELECT EXISTS(SELECT 1 FROM downloads WHERE id = ?1)",
+                [download_id],
+                |row| row.get(0),
+            )?;
+            if !exists {
+                return Err(StorageError::DownloadNotFound(download_id));
+            }
+        }
         Ok(())
     }
 

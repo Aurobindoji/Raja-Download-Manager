@@ -20,25 +20,24 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
     let mut input = io::stdin().lock();
     let mut output = io::stdout().lock();
 
-    loop {
-        let mut length_bytes = [0; 4];
-        match input.read(&mut length_bytes[..1])? {
-            0 => return Ok(()),
-            _ => input.read_exact(&mut length_bytes[1..])?,
-        }
-        let length = u32::from_le_bytes(length_bytes) as usize;
-        if length == 0 || length > MAX_MESSAGE_SIZE {
-            write_response(&mut output, false, "Invalid native message size.")?;
-            continue;
-        }
-
-        let mut message = vec![0; length];
-        input.read_exact(&mut message)?;
-        match handle_request(&inbox, &message, true) {
-            Ok(response) => write_json_response(&mut output, &response)?,
-            Err(error) => write_response(&mut output, false, &error)?,
-        }
+    let mut length_bytes = [0; 4];
+    match input.read(&mut length_bytes[..1])? {
+        0 => return Ok(()),
+        _ => input.read_exact(&mut length_bytes[1..])?,
     }
+    let length = u32::from_le_bytes(length_bytes) as usize;
+    if length == 0 || length > MAX_MESSAGE_SIZE {
+        write_response(&mut output, false, "Invalid native message size.")?;
+        return Ok(());
+    }
+
+    let mut message = vec![0; length];
+    input.read_exact(&mut message)?;
+    match handle_request(&inbox, &message, true) {
+        Ok(response) => write_json_response(&mut output, &response)?,
+        Err(error) => write_response(&mut output, false, &error)?,
+    }
+    Ok(())
 }
 
 fn inbox_directory() -> Result<PathBuf, Box<dyn std::error::Error>> {
@@ -93,10 +92,34 @@ fn handle_request(
         return Err("Unsupported video quality.".to_owned());
     }
 
+    let title = value
+        .get("title")
+        .and_then(serde_json::Value::as_str)
+        .map(str::trim)
+        .filter(|s| !s.is_empty());
+    let container = value
+        .get("container")
+        .and_then(serde_json::Value::as_str)
+        .map(str::trim)
+        .filter(|s| !s.is_empty());
+    let description = value
+        .get("description")
+        .and_then(serde_json::Value::as_str)
+        .map(str::trim)
+        .filter(|s| !s.is_empty());
+    let file_size = value
+        .get("file_size")
+        .and_then(serde_json::Value::as_u64)
+        .filter(|&sz| sz > 0);
+
     let request = serde_json::json!({
         "url": parsed.as_str(),
         "kind": kind,
         "max_height": max_height,
+        "title": title,
+        "container": container,
+        "description": description,
+        "file_size": file_size,
     });
     let bytes = serde_json::to_vec(&request).map_err(|error| error.to_string())?;
     let timestamp = SystemTime::now()
@@ -200,7 +223,6 @@ fn start_raja_ui() -> io::Result<()> {
             "raja-ui"
         });
     Command::new(ui_executable)
-        .arg("--background")
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null())

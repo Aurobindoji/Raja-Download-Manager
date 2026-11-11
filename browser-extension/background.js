@@ -1,4 +1,5 @@
 const MENU_ID = "raja-download";
+const formatCache = new Map();
 
 chrome.runtime.onInstalled.addListener(() => {
   chrome.contextMenus.removeAll(() => {
@@ -35,7 +36,13 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
   }
 
   const kind = message.type === "raja-download-link" ? "http" : "video";
-  sendToRaja(message.url, kind, sendResponse, message.maxHeight);
+  sendToRaja(message.url, kind, sendResponse, {
+    maxHeight: message.maxHeight,
+    title: message.title,
+    container: message.container,
+    description: message.description,
+    fileSize: message.fileSize
+  });
   return true;
 });
 
@@ -59,6 +66,12 @@ function queryVideoFormats(candidate, callback) {
     return;
   }
 
+  const cached = formatCache.get(url.href);
+  if (cached && Date.now() - cached.timestamp < 5 * 60 * 1000) {
+    callback(cached.response);
+    return;
+  }
+
   chrome.runtime.sendNativeMessage(
     "com.raja.browser",
     { action: "list_formats", url: url.href },
@@ -67,12 +80,16 @@ function queryVideoFormats(candidate, callback) {
         callback({ ok: false, message: chrome.runtime.lastError.message });
         return;
       }
-      callback(response || { ok: false, message: "RAJA did not return video formats." });
+      const result = response || { ok: false, message: "RAJA did not return video formats." };
+      if (result.ok) {
+        formatCache.set(url.href, { timestamp: Date.now(), response: result });
+      }
+      callback(result);
     }
   );
 }
 
-function sendToRaja(candidate, kind, callback = () => {}, maxHeight) {
+function sendToRaja(candidate, kind, callback = () => {}, meta = {}) {
   const url = parseHttpUrl(candidate);
   if (!url) {
     callback({ ok: false, message: "Only HTTP or HTTPS links are supported." });
@@ -81,7 +98,16 @@ function sendToRaja(candidate, kind, callback = () => {}, maxHeight) {
 
   chrome.runtime.sendNativeMessage(
     "com.raja.browser",
-    { action: "download", url: url.href, kind, max_height: maxHeight },
+    {
+      action: "download",
+      url: url.href,
+      kind,
+      max_height: meta.maxHeight,
+      title: meta.title,
+      container: meta.container,
+      description: meta.description,
+      file_size: meta.fileSize
+    },
     (response) => {
       if (chrome.runtime.lastError) {
         const handoff = new URL("raja://download");

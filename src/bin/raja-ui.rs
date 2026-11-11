@@ -1996,6 +1996,9 @@ impl RajaUi {
                     self.status = torrent_line.trim().to_owned();
                 }
             } else if let Some((download_id, output_path)) = parse_video_output_line(&line) {
+                // The printed path can be mangled (console encoding); recover the
+                // real file on disk when the reported path does not exist.
+                let output_path = resolve_reported_video_path(&output_path);
                 if let Err(error) = self.update_video_output_path(download_id, &output_path) {
                     self.status = format!("Could not save final video path: {error}");
                 }
@@ -8108,6 +8111,52 @@ fn parse_video_progress_line(line: &str) -> Option<(i64, u64, Option<u64>)> {
         return None;
     }
     Some((download_id, downloaded_bytes, total_bytes))
+}
+
+/// Returns `reported` if it exists; otherwise looks in the same folder for the
+/// most recently modified file whose ASCII letters/digits and extension match
+/// (non-ASCII characters may have been lost when yt-dlp printed the path).
+fn resolve_reported_video_path(reported: &str) -> String {
+    let path = std::path::Path::new(reported);
+    if path.is_file() {
+        return reported.to_owned();
+    }
+    let ascii_key = |name: &str| -> String {
+        name.chars()
+            .filter(|c| c.is_ascii_alphanumeric())
+            .map(|c| c.to_ascii_lowercase())
+            .collect()
+    };
+    let (Some(dir), Some(name)) = (path.parent(), path.file_name().and_then(|n| n.to_str())) else {
+        return reported.to_owned();
+    };
+    let wanted_key = ascii_key(name);
+    let wanted_ext = path
+        .extension()
+        .and_then(|e| e.to_str())
+        .map(str::to_ascii_lowercase);
+    if wanted_key.is_empty() {
+        return reported.to_owned();
+    }
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return reported.to_owned();
+    };
+    entries
+        .flatten()
+        .filter_map(|entry| {
+            let candidate = entry.path();
+            let file_name = candidate.file_name()?.to_str()?.to_owned();
+            let ext = candidate
+                .extension()
+                .and_then(|e| e.to_str())
+                .map(str::to_ascii_lowercase);
+            let metadata = entry.metadata().ok()?;
+            (metadata.is_file() && ext == wanted_ext && ascii_key(&file_name) == wanted_key)
+                .then(|| (metadata.modified().ok(), candidate))
+        })
+        .max_by_key(|(modified, _)| *modified)
+        .map(|(_, candidate)| candidate.to_string_lossy().into_owned())
+        .unwrap_or_else(|| reported.to_owned())
 }
 
 fn parse_video_output_line(line: &str) -> Option<(i64, String)> {

@@ -81,6 +81,10 @@ pub fn configure_video_tool_path(command: &mut Command) {
     if let Ok(path) = env::join_paths(paths) {
         command.env("PATH", path);
     }
+    // yt-dlp is a Python program: force UTF-8 stdout so non-ASCII titles
+    // (e.g. Hindi) in printed file paths are not mangled by the console code page.
+    command.env("PYTHONIOENCODING", "utf-8");
+    command.env("PYTHONUTF8", "1");
 }
 
 fn find_in_path(executable: &str) -> Option<PathBuf> {

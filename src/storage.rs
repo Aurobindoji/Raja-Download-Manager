@@ -381,6 +381,20 @@ impl Storage {
             SCHEMA_VERSION => {}
             newer => return Err(StorageError::UnsupportedSchemaVersion(newer)),
         }
+        // Optional per-download description (the "Description" column). A
+        // side table keeps older databases and older Raja versions working.
+        transaction.execute_batch(
+            "CREATE TABLE IF NOT EXISTS download_descriptions (
+                download_id INTEGER PRIMARY KEY
+                    REFERENCES downloads(id) ON DELETE CASCADE,
+                description TEXT NOT NULL
+             );
+             CREATE TABLE IF NOT EXISTS download_server_urls (
+                download_id INTEGER PRIMARY KEY
+                    REFERENCES downloads(id) ON DELETE CASCADE,
+                server_url TEXT NOT NULL
+             );",
+        )?;
         transaction.commit()?;
 
         Ok(Self { connection })
@@ -572,6 +586,65 @@ impl Storage {
             params![key, value],
         )?;
         Ok(())
+    }
+
+    /// Sets (or, when empty, clears) the description shown for a download.
+    pub fn set_download_description(
+        &mut self,
+        download_id: i64,
+        description: &str,
+    ) -> Result<(), StorageError> {
+        let description = description.trim();
+        if description.is_empty() {
+            self.connection.execute(
+                "DELETE FROM download_descriptions WHERE download_id = ?1",
+                [download_id],
+            )?;
+        } else {
+            self.connection.execute(
+                "INSERT INTO download_descriptions (download_id, description) VALUES (?1, ?2)
+                 ON CONFLICT(download_id) DO UPDATE SET description = excluded.description",
+                params![download_id, description],
+            )?;
+        }
+        Ok(())
+    }
+
+    /// Records the address the file was actually fetched from (for a video
+    /// page: the media server link yt-dlp downloaded, not the page itself).
+    pub fn set_download_server_url(
+        &mut self,
+        download_id: i64,
+        server_url: &str,
+    ) -> Result<(), StorageError> {
+        self.connection.execute(
+            "INSERT INTO download_server_urls (download_id, server_url) VALUES (?1, ?2)
+             ON CONFLICT(download_id) DO UPDATE SET server_url = excluded.server_url",
+            params![download_id, server_url.trim()],
+        )?;
+        Ok(())
+    }
+
+    /// All recorded server addresses, by download id.
+    pub fn download_server_urls(
+        &self,
+    ) -> Result<std::collections::HashMap<i64, String>, StorageError> {
+        let mut statement = self
+            .connection
+            .prepare("SELECT download_id, server_url FROM download_server_urls")?;
+        let rows = statement.query_map([], |row| Ok((row.get(0)?, row.get(1)?)))?;
+        Ok(rows.collect::<Result<_, _>>()?)
+    }
+
+    /// All saved descriptions, by download id.
+    pub fn download_descriptions(
+        &self,
+    ) -> Result<std::collections::HashMap<i64, String>, StorageError> {
+        let mut statement = self
+            .connection
+            .prepare("SELECT download_id, description FROM download_descriptions")?;
+        let rows = statement.query_map([], |row| Ok((row.get(0)?, row.get(1)?)))?;
+        Ok(rows.collect::<Result<_, _>>()?)
     }
 
     pub fn list_downloads(&self) -> Result<Vec<DownloadSummary>, StorageError> {
@@ -2312,6 +2385,53 @@ mod tests {
             Err(StorageError::UnsupportedSchemaVersion(version))
                 if version == SCHEMA_VERSION + 1
         ));
+    }
+
+    #[test]
+    fn saves_updates_and_clears_download_descriptions() {
+        let database = TestDatabase::new();
+        let mut storage = Storage::open(&database.0).unwrap();
+        let id = storage
+            .create_video_download("https://example.test/v", "v.mp4", "downloads")
+            .unwrap();
+        storage
+            .set_download_description(id, " MP4 file, quality 720p HD ")
+            .unwrap();
+        assert_eq!(
+            storage
+                .download_descriptions()
+                .unwrap()
+                .get(&id)
+                .map(String::as_str),
+            Some("MP4 file, quality 720p HD")
+        );
+        storage.set_download_description(id, "My note").unwrap();
+        assert_eq!(
+            storage
+                .download_descriptions()
+                .unwrap()
+                .get(&id)
+                .map(String::as_str),
+            Some("My note")
+        );
+        storage.set_download_description(id, "  ").unwrap();
+        assert!(storage.download_descriptions().unwrap().is_empty());
+
+        storage
+            .set_download_server_url(id, "https://media.example.test/v?sig=1")
+            .unwrap();
+        assert_eq!(
+            storage
+                .download_server_urls()
+                .unwrap()
+                .get(&id)
+                .map(String::as_str),
+            Some("https://media.example.test/v?sig=1")
+        );
+
+        // Reopening an existing database keeps working (table already there).
+        drop(storage);
+        assert!(Storage::open(&database.0).is_ok());
     }
 
     #[test]

@@ -206,6 +206,15 @@ struct RajaUi {
     prop_save_to: String,
     prop_address: String,
     prop_description: String,
+    /// Saved descriptions by download id (the "Description" column).
+    descriptions: HashMap<i64, String>,
+    /// Description typed in the add box, waiting for its download (by URL) to
+    /// appear in the list: HTTP downloads are created by the engine process.
+    pending_descriptions: Vec<(String, String)>,
+    /// Address each file was actually downloaded from (video: media server).
+    server_urls: HashMap<i64, String>,
+    /// The Address shown when Properties opened, to detect a real edit.
+    prop_address_shown: String,
     prop_referer: String,
     prop_login: String,
     prop_password: String,
@@ -481,6 +490,10 @@ impl RajaUi {
             prop_save_to: String::new(),
             prop_address: String::new(),
             prop_description: String::new(),
+            descriptions: HashMap::new(),
+            pending_descriptions: Vec::new(),
+            server_urls: HashMap::new(),
+            prop_address_shown: String::new(),
             prop_referer: String::new(),
             prop_login: String::new(),
             prop_password: String::new(),
@@ -517,6 +530,44 @@ impl RajaUi {
         Ok(app)
     }
 
+    /// Saves descriptions typed in the add box onto their new downloads and
+    /// reloads all descriptions.
+    fn attach_pending_descriptions(&mut self) {
+        let Ok(mut storage) = Storage::open(&self.database) else {
+            return;
+        };
+        if !self.pending_descriptions.is_empty()
+            && let Ok(downloads) = storage.list_downloads()
+        {
+            let same_url = |a: &str, b: &str| {
+                a.trim() == b.trim()
+                    || validate_external_url(a)
+                        .ok()
+                        .zip(validate_external_url(b).ok())
+                        .is_some_and(|(a, b)| a == b)
+            };
+            let known = storage.download_descriptions().unwrap_or_default();
+            self.pending_descriptions.retain(|(url, description)| {
+                // Newest download for this URL that has no description yet.
+                let target = downloads
+                    .iter()
+                    .filter(|d| same_url(&d.source_url, url) && !known.contains_key(&d.id))
+                    .map(|d| d.id)
+                    .max();
+                match target {
+                    Some(id) => storage.set_download_description(id, description).is_err(),
+                    None => true,
+                }
+            });
+        }
+        if let Ok(descriptions) = storage.download_descriptions() {
+            self.descriptions = descriptions;
+        }
+        if let Ok(server_urls) = storage.download_server_urls() {
+            self.server_urls = server_urls;
+        }
+    }
+
     fn refresh_downloads(&mut self) {
         let database_path = PathBuf::from(&self.database);
         if let Some(parent) = database_path.parent()
@@ -524,6 +575,9 @@ impl RajaUi {
         {
             self.status = format!("Could not create database folder: {error}");
             return;
+        }
+        if !self.pending_descriptions.is_empty() || self.descriptions.is_empty() {
+            self.attach_pending_descriptions();
         }
         match Storage::open(&self.database).and_then(|storage| storage.list_downloads()) {
             Ok(downloads) => {
@@ -1955,14 +2009,20 @@ impl RajaUi {
         self.selected_download = Some(download_id);
         self.prop_download_id = Some(download_id);
         self.prop_save_to = download.output_path.to_string_lossy().into_owned();
-        self.prop_address = download.source_url.clone();
-        self.prop_description = if is_torrent_source(&download.source_url) {
-            "BitTorrent / Magnet".to_owned()
-        } else if download.download_kind == "video" {
-            "Video page (yt-dlp)".to_owned()
-        } else {
-            String::new()
-        };
+        // Address = where the bytes really came from. For a video page that is
+        // the media server link; the page itself is shown as the web page and
+        // the referer.
+        self.prop_address = self
+            .server_urls
+            .get(&download.id)
+            .cloned()
+            .unwrap_or_else(|| download.source_url.clone());
+        self.prop_address_shown = self.prop_address.clone();
+        self.prop_description = self
+            .descriptions
+            .get(&download.id)
+            .cloned()
+            .unwrap_or_else(|| default_description(&download).to_owned());
         self.prop_referer = if download.download_kind == "video" {
             download.source_url.clone()
         } else {
@@ -1986,8 +2046,25 @@ impl RajaUi {
             self.move_rename_path = new_path_str;
             self.apply_move_rename();
         }
+        let description = self.prop_description.trim().to_owned();
+        let current = self
+            .descriptions
+            .get(&download_id)
+            .map(String::as_str)
+            .unwrap_or_else(|| default_description(&download));
+        if description != current {
+            match Storage::open(&self.database)
+                .and_then(|mut storage| storage.set_download_description(download_id, &description))
+            {
+                Ok(()) => self.attach_pending_descriptions(),
+                Err(error) => self.status = format!("Could not save the description: {error}"),
+            }
+        }
         let new_url = self.prop_address.trim().to_owned();
-        if !new_url.is_empty() && new_url != download.source_url {
+        if !new_url.is_empty()
+            && new_url != self.prop_address_shown.trim()
+            && new_url != download.source_url
+        {
             self.selected_download = Some(download_id);
             self.refresh_address_url = new_url;
             self.apply_refresh_address();
@@ -2137,6 +2214,13 @@ impl RajaUi {
                 if let Err(error) = self.update_video_output_path(download_id, &output_path) {
                     self.status = format!("Could not save final video path: {error}");
                 }
+            } else if let Some((download_id, server_url)) = parse_server_url_line(&line) {
+                if let Err(error) = Storage::open(&self.database).and_then(|mut storage| {
+                    storage.set_download_server_url(download_id, server_url)
+                }) {
+                    self.status = format!("Could not save the download address: {error}");
+                }
+                self.server_urls.insert(download_id, server_url.to_owned());
             } else if let Some((download_id, announced)) = parse_video_size_line(&line) {
                 self.video_streams
                     .entry(download_id)
@@ -4167,13 +4251,11 @@ fn draw_download_table(app: &mut RajaUi, ui: &mut egui::Ui) {
                         String::new()
                     };
                     let date_text = table_date_label(download.last_attempt_at);
-                    let desc_text = if is_torrent_source(&download.source_url) {
-                        "BitTorrent / Magnet"
-                    } else if download.download_kind == "video" {
-                        "Video page (yt-dlp)"
-                    } else {
-                        ""
-                    };
+                    let desc_text = app
+                        .descriptions
+                        .get(&download.id)
+                        .map(String::as_str)
+                        .unwrap_or_else(|| default_description(download));
 
                     let cells = [
                         download.file_name.as_str(),
@@ -4901,6 +4983,11 @@ fn draw_add_download_dialog(app: &mut RajaUi, context: &egui::Context) -> Option
 
     if !open {
         app.show_add_dialog = false;
+    }
+    if (download_later || start_download) && !app.add_description.trim().is_empty() {
+        let url = app.url.trim().to_owned();
+        let description = app.add_description.trim().to_owned();
+        app.pending_descriptions.push((url, description));
     }
     if download_later {
         app.enqueue_download_later();
@@ -7187,6 +7274,10 @@ fn video_job_arguments_for_height(
         // Combined size of the chosen video + audio, printed before downloading.
         "--print".to_owned(),
         format!("before_dl:RAJA_SIZE:{download_id}:%(filesize,filesize_approx)s"),
+        // The media server link actually downloaded (first stream), for the
+        // Address field in File Properties.
+        "--print".to_owned(),
+        format!("before_dl:RAJA_SERVER_URL:{download_id}:%(requested_formats.0.url,url)s"),
         "--print".to_owned(),
         format!("after_move:RAJA_OUTPUT:{download_id}:%(filepath)s"),
         url,
@@ -7414,6 +7505,17 @@ fn category_directory_path(base_dir: &str, cat: AddFileCategory) -> String {
         s.push('\\');
     }
     s
+}
+
+/// Shown in the Description column when the user gave no description.
+fn default_description(download: &DownloadSummary) -> &'static str {
+    if is_torrent_source(&download.source_url) {
+        "BitTorrent / Magnet"
+    } else if download.download_kind == "video" {
+        "Video page"
+    } else {
+        ""
+    }
 }
 
 fn is_likely_video_page_url(url: &str) -> bool {
@@ -8380,6 +8482,15 @@ fn parse_video_progress_line(line: &str) -> Option<VideoProgressLine> {
     Some((download_id, downloaded_bytes, total_bytes, stream))
 }
 
+/// `RAJA_SERVER_URL:<id>:<url>`: the media link yt-dlp is about to download.
+fn parse_server_url_line(line: &str) -> Option<(i64, &str)> {
+    let rest = line.strip_prefix("RAJA_SERVER_URL:")?;
+    let (download_id, url) = rest.split_once(':')?;
+    let url = url.trim();
+    (url.starts_with("http://") || url.starts_with("https://"))
+        .then_some((download_id.parse().ok()?, url))
+}
+
 /// `RAJA_SIZE:<id>:<bytes>`: the combined size yt-dlp announces before it
 /// starts downloading.
 fn parse_video_size_line(line: &str) -> Option<(i64, u64)> {
@@ -8791,10 +8902,11 @@ mod tests {
     use super::{
         DownloadCategory, ProgressSample, VideoStreams, browser_suggested_filename,
         explain_ytdlp_error, format_duration, last_attempt_label, lossy_lines, parse_launch_url,
-        parse_video_error_line, parse_video_output_line, parse_video_progress_line,
-        parse_video_size_line, queueable_download_ids, suggested_filename, time_left_label,
-        transfer_rate_label, use_saved_video_info, video_extraction_arguments,
-        video_extraction_arguments_for_height, video_job_arguments, video_output_template,
+        parse_server_url_line, parse_video_error_line, parse_video_output_line,
+        parse_video_progress_line, parse_video_size_line, queueable_download_ids,
+        suggested_filename, time_left_label, transfer_rate_label, use_saved_video_info,
+        video_extraction_arguments, video_extraction_arguments_for_height, video_job_arguments,
+        video_output_template,
     };
     use raja_core::storage::DownloadSummary;
     use std::ffi::OsString;
@@ -8889,6 +9001,20 @@ mod tests {
         assert!(text.starts_with("ERROR: [youtube] x: Sign in to confirm you"));
         assert!(text.ends_with("re not a bot"));
         assert!(explain_ytdlp_error(&text).unwrap().contains("not a bot"));
+    }
+
+    #[test]
+    fn parses_the_media_server_address_line() {
+        assert_eq!(
+            parse_server_url_line(
+                "RAJA_SERVER_URL:5:https://rr1---sn-x.googlevideo.com/videoplayback?expire=1&a=b:c"
+            ),
+            Some((
+                5,
+                "https://rr1---sn-x.googlevideo.com/videoplayback?expire=1&a=b:c"
+            ))
+        );
+        assert_eq!(parse_server_url_line("RAJA_SERVER_URL:5:NA"), None);
     }
 
     #[test]

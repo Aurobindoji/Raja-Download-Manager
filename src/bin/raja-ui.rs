@@ -342,8 +342,7 @@ impl RajaUi {
             .unwrap_or_else(|| std::path::Path::new("."))
             .join(executable_name);
         let (output_tx, output_rx) = mpsc::channel();
-        let default_download_dir_str =
-            default_download_directory.to_string_lossy().into_owned();
+        let default_download_dir_str = default_download_directory.to_string_lossy().into_owned();
         let initial_cat = suggested_output
             .as_ref()
             .and_then(|p| p.file_name())
@@ -1065,13 +1064,13 @@ impl RajaUi {
             return;
         }
         let path = PathBuf::from(trimmed);
-        if path.is_file() {
-            if let Ok((root_name, entries)) = parse_torrent_file(&path) {
-                self.torrent_root_name = root_name;
-                self.torrent_files = entries;
-                self.torrent_collapsed_folders.clear();
-                return;
-            }
+        if path.is_file()
+            && let Ok((root_name, entries)) = parse_torrent_file(&path)
+        {
+            self.torrent_root_name = root_name;
+            self.torrent_files = entries;
+            self.torrent_collapsed_folders.clear();
+            return;
         }
         if trimmed.len() >= 8 && trimmed[..7].eq_ignore_ascii_case("magnet:") {
             let magnet_name = suggested_torrent_name(trimmed);
@@ -1093,8 +1092,7 @@ impl RajaUi {
         }
         #[cfg(windows)]
         if pick_file_first && self.torrent_source.trim().is_empty() {
-            let mut dialog =
-                rfd::FileDialog::new().add_filter("BitTorrent File", &["torrent"]);
+            let mut dialog = rfd::FileDialog::new().add_filter("BitTorrent File", &["torrent"]);
             let default_dir = PathBuf::from(&self.default_download_directory);
             if default_dir.is_dir() {
                 dialog = dialog.set_directory(default_dir);
@@ -1442,7 +1440,9 @@ impl RajaUi {
         {
             let arg = format!("shell32.dll,OpenAs_RunDLL {}", output_path.display());
             match Command::new("rundll32.exe").arg(arg).spawn() {
-                Ok(_) => self.status = format!("Opened 'Open with...' for \"{}\".", download.file_name),
+                Ok(_) => {
+                    self.status = format!("Opened 'Open with...' for \"{}\".", download.file_name)
+                }
                 Err(error) => self.status = format!("Could not launch 'Open with...': {error}"),
             }
         }
@@ -1518,7 +1518,11 @@ impl RajaUi {
             return;
         };
         let new_path = PathBuf::from(self.move_rename_path.trim());
-        let Some(new_name) = new_path.file_name().and_then(|n| n.to_str()).filter(|s| !s.is_empty()) else {
+        let Some(new_name) = new_path
+            .file_name()
+            .and_then(|n| n.to_str())
+            .filter(|s| !s.is_empty())
+        else {
             self.status = "New path must include a valid file name.".to_owned();
             return;
         };
@@ -1534,11 +1538,12 @@ impl RajaUi {
             self.status = format!("Could not create destination folder: {error}");
             return;
         }
-        if download.output_path != new_path && download.output_path.exists() {
-            if let Err(error) = std::fs::rename(&download.output_path, &new_path) {
-                self.status = format!("Could not move/rename file on disk: {error}");
-                return;
-            }
+        if download.output_path != new_path
+            && download.output_path.exists()
+            && let Err(error) = std::fs::rename(&download.output_path, &new_path)
+        {
+            self.status = format!("Could not move/rename file on disk: {error}");
+            return;
         }
         match Storage::open(&self.database)
             .and_then(|mut s| s.update_download_output(download_id, new_name, new_dir_str))
@@ -1616,7 +1621,7 @@ impl RajaUi {
             return;
         };
         let new_path_str = self.prop_save_to.trim().to_owned();
-        if !new_path_str.is_empty() && PathBuf::from(&new_path_str) != download.output_path {
+        if !new_path_str.is_empty() && std::path::Path::new(&new_path_str) != download.output_path {
             self.selected_download = Some(download_id);
             self.move_rename_path = new_path_str;
             self.apply_move_rename();
@@ -1932,14 +1937,11 @@ impl RajaUi {
                         removed += 1;
                     }
                 }
-                if self
-                    .selected_download
-                    .is_some_and(|sel| {
-                        self.downloads
-                            .iter()
-                            .any(|d| d.id == sel && d.status == "complete")
-                    })
-                {
+                if self.selected_download.is_some_and(|sel| {
+                    self.downloads
+                        .iter()
+                        .any(|d| d.id == sel && d.status == "complete")
+                }) {
                     self.selected_download = None;
                 }
                 self.refresh_downloads();
@@ -2052,15 +2054,15 @@ impl eframe::App for RajaUi {
             )
             .show(ui, |ui| draw_download_table(self, ui));
 
-        if !context.egui_wants_keyboard_input() {
-            if let Some(sel_id) = self.selected_download {
-                let ctrl_m = context.input(|i| i.modifiers.command && i.key_pressed(egui::Key::M));
-                let del_key = context.input(|i| i.key_pressed(egui::Key::Delete));
-                if ctrl_m {
-                    self.open_move_rename_dialog(sel_id);
-                } else if del_key {
-                    self.request_remove_download(sel_id);
-                }
+        if !context.egui_wants_keyboard_input()
+            && let Some(sel_id) = self.selected_download
+        {
+            let ctrl_m = context.input(|i| i.modifiers.command && i.key_pressed(egui::Key::M));
+            let del_key = context.input(|i| i.key_pressed(egui::Key::Delete));
+            if ctrl_m {
+                self.open_move_rename_dialog(sel_id);
+            } else if del_key {
+                self.request_remove_download(sel_id);
             }
         }
 
@@ -2335,9 +2337,8 @@ fn draw_toolbar(app: &mut RajaUi, ui: &mut egui::Ui) {
         .downloads
         .iter()
         .find(|download| Some(download.id) == app.selected_download);
-    let can_retry = selected.is_some_and(|download| {
-        matches!(download.status.as_str(), "failed" | "paused" | "queued")
-    });
+    let can_retry = selected
+        .is_some_and(|download| matches!(download.status.as_str(), "failed" | "paused" | "queued"));
     let can_pause = selected.is_some_and(|download| download.status == "active");
     let can_forget = selected.is_some();
     let has_completed = app
@@ -2352,9 +2353,10 @@ fn draw_toolbar(app: &mut RajaUi, ui: &mut egui::Ui) {
             .children
             .iter()
             .any(|process| matches!(process.kind, ProcessKind::Video | ProcessKind::Torrent));
-    let can_start_queue = app.downloads.iter().any(|download| {
-        matches!(download.status.as_str(), "queued" | "paused" | "failed")
-    });
+    let can_start_queue = app
+        .downloads
+        .iter()
+        .any(|download| matches!(download.status.as_str(), "queued" | "paused" | "failed"));
 
     egui::Frame::new()
         .fill(egui::Color32::from_rgb(45, 45, 48))
@@ -2388,9 +2390,15 @@ fn draw_toolbar(app: &mut RajaUi, ui: &mut egui::Ui) {
                 {
                     app.pause_download(id);
                 }
-                if draw_idm_toolbar_button(ui, ToolbarIcon::StopAll, "Stop All", can_pause_all, false)
-                    .on_hover_text("Stop all active downloads")
-                    .clicked()
+                if draw_idm_toolbar_button(
+                    ui,
+                    ToolbarIcon::StopAll,
+                    "Stop All",
+                    can_pause_all,
+                    false,
+                )
+                .on_hover_text("Stop all active downloads")
+                .clicked()
                 {
                     app.pause_all();
                 }
@@ -2461,9 +2469,15 @@ fn draw_toolbar(app: &mut RajaUi, ui: &mut egui::Ui) {
                 {
                     app.stop_queue();
                 }
-                if draw_idm_toolbar_button(ui, ToolbarIcon::TellFriend, "Tell a Frie...", true, false)
-                    .on_hover_text("About RAJA / Share with a friend")
-                    .clicked()
+                if draw_idm_toolbar_button(
+                    ui,
+                    ToolbarIcon::TellFriend,
+                    "Tell a Frie...",
+                    true,
+                    false,
+                )
+                .on_hover_text("About RAJA / Share with a friend")
+                .clicked()
                 {
                     app.show_tell_friend_dialog = true;
                 }
@@ -2948,19 +2962,10 @@ fn paint_toolbar_icon(
             let r = 7.5;
 
             // Silver pole tips at top of U-magnet
-            painter.line_segment(
-                [egui::pos2(left_x, top_y), egui::pos2(left_x, mid_y)],
-                ts,
-            );
-            painter.line_segment(
-                [egui::pos2(right_x, top_y), egui::pos2(right_x, mid_y)],
-                ts,
-            );
+            painter.line_segment([egui::pos2(left_x, top_y), egui::pos2(left_x, mid_y)], ts);
+            painter.line_segment([egui::pos2(right_x, top_y), egui::pos2(right_x, mid_y)], ts);
             // Red magnet sides
-            painter.line_segment(
-                [egui::pos2(left_x, mid_y), egui::pos2(left_x, arc_cy)],
-                ms,
-            );
+            painter.line_segment([egui::pos2(left_x, mid_y), egui::pos2(left_x, arc_cy)], ms);
             painter.line_segment(
                 [egui::pos2(right_x, mid_y), egui::pos2(right_x, arc_cy)],
                 ms,
@@ -3025,11 +3030,9 @@ fn draw_categories(app: &mut RajaUi, ui: &mut egui::Ui) {
         egui::vec2(inner.width(), header_height),
         egui::Sense::hover(),
     );
-    child_ui.painter().rect_filled(
-        header_rect,
-        0.0,
-        egui::Color32::from_rgb(28, 28, 30),
-    );
+    child_ui
+        .painter()
+        .rect_filled(header_rect, 0.0, egui::Color32::from_rgb(28, 28, 30));
     child_ui.painter().text(
         egui::pos2(header_rect.left() + 5.0, header_rect.center().y),
         egui::Align2::LEFT_CENTER,
@@ -3042,11 +3045,7 @@ fn draw_categories(app: &mut RajaUi, ui: &mut egui::Ui) {
         egui::vec2(14.0, 14.0),
     );
     let close_id = child_ui.make_persistent_id("close-categories-panel");
-    let close_resp = child_ui.interact(
-        close_rect,
-        close_id,
-        egui::Sense::click(),
-    );
+    let close_resp = child_ui.interact(close_rect, close_id, egui::Sense::click());
     let close_color = if close_resp.hovered() {
         egui::Color32::WHITE
     } else {
@@ -3214,7 +3213,7 @@ fn draw_category_tree_row(
         }
     }
 
-    paint_category_icon(&painter, category, egui::pos2(icon_x + 6.0, rect.center().y));
+    paint_category_icon(painter, category, egui::pos2(icon_x + 6.0, rect.center().y));
 
     painter.text(
         egui::pos2(text_x, rect.center().y),
@@ -3237,11 +3236,7 @@ fn draw_category_tree_row(
     }
 }
 
-fn paint_category_icon(
-    painter: &egui::Painter,
-    category: DownloadCategory,
-    center: egui::Pos2,
-) {
+fn paint_category_icon(painter: &egui::Painter, category: DownloadCategory, center: egui::Pos2) {
     let folder_gold = egui::Color32::from_rgb(228, 188, 86);
     let folder_dark = egui::Color32::from_rgb(176, 138, 46);
     let draw_folder = |painter: &egui::Painter| {
@@ -3432,10 +3427,8 @@ fn draw_download_table(app: &mut RajaUi, ui: &mut egui::Ui) {
     table_ui.spacing_mut().item_spacing = egui::vec2(0.0, 0.0);
 
     let header_h = 22.0;
-    let (header_rect, _) = table_ui.allocate_exact_size(
-        egui::vec2(inner.width(), header_h),
-        egui::Sense::hover(),
-    );
+    let (header_rect, _) =
+        table_ui.allocate_exact_size(egui::vec2(inner.width(), header_h), egui::Sense::hover());
     let hp = table_ui.painter();
     hp.rect_filled(header_rect, 0.0, header_bg);
     let mut cx = header_rect.left();
@@ -3478,10 +3471,8 @@ fn draw_download_table(app: &mut RajaUi, ui: &mut egui::Ui) {
         .cloned()
         .collect::<Vec<_>>();
 
-    let body_rect = egui::Rect::from_min_max(
-        egui::pos2(inner.left(), header_rect.bottom()),
-        inner.max,
-    );
+    let body_rect =
+        egui::Rect::from_min_max(egui::pos2(inner.left(), header_rect.bottom()), inner.max);
     let row_h = 20.0_f32;
     let min_visible_rows = ((body_rect.height() / row_h).ceil() as usize).max(1);
     let total_rows = downloads.len().max(min_visible_rows);
@@ -3518,17 +3509,9 @@ fn draw_download_table(app: &mut RajaUi, ui: &mut egui::Ui) {
                 if let Some(download) = downloads.get(row_idx) {
                     let selected = app.selected_download == Some(download.id);
                     if selected {
-                        rp.rect_filled(
-                            row_rect,
-                            0.0,
-                            egui::Color32::from_rgb(56, 78, 108),
-                        );
+                        rp.rect_filled(row_rect, 0.0, egui::Color32::from_rgb(56, 78, 108));
                     } else if response.hovered() {
-                        rp.rect_filled(
-                            row_rect,
-                            0.0,
-                            egui::Color32::from_rgb(42, 42, 46),
-                        );
+                        rp.rect_filled(row_rect, 0.0, egui::Color32::from_rgb(42, 42, 46));
                     }
 
                     if response.clicked() {
@@ -3566,18 +3549,12 @@ fn draw_download_table(app: &mut RajaUi, ui: &mut egui::Ui) {
                         let file_exists =
                             download.output_path.is_file() || download.output_path.is_dir();
                         let folder_exists = file_exists
-                            || download
-                                .output_path
-                                .parent()
-                                .is_some_and(|p| p.is_dir());
+                            || download.output_path.parent().is_some_and(|p| p.is_dir());
                         let is_queued =
                             download.status == "queued" || app.queue.contains(&download.id);
 
                         if ui
-                            .add_enabled(
-                                is_complete && file_exists,
-                                egui::Button::new("Open"),
-                            )
+                            .add_enabled(is_complete && file_exists, egui::Button::new("Open"))
                             .clicked()
                         {
                             open_file_after = true;
@@ -3604,10 +3581,7 @@ fn draw_download_table(app: &mut RajaUi, ui: &mut egui::Ui) {
                         ui.separator();
 
                         if ui
-                            .add_enabled(
-                                !is_active,
-                                egui::Button::new("Move/Rename (Ctrl-M)"),
-                            )
+                            .add_enabled(!is_active, egui::Button::new("Move/Rename (Ctrl-M)"))
                             .clicked()
                         {
                             move_rename_id = Some(download.id);
@@ -3741,11 +3715,7 @@ fn draw_download_table(app: &mut RajaUi, ui: &mut egui::Ui) {
                         .filter(|_| is_active)
                         .and_then(|sample| sample.bytes_per_second);
 
-                    let q_text = if download.status == "queued" {
-                        "Q"
-                    } else {
-                        ""
-                    };
+                    let q_text = if download.status == "queued" { "Q" } else { "" };
                     let size_text = download.total_size.map_or_else(
                         || {
                             if download.durable_bytes > 0 {
@@ -3959,8 +3929,7 @@ fn paint_file_type_icon(painter: &egui::Painter, file_name: &str, center: egui::
         .and_then(|e| e.to_str())
         .unwrap_or_default();
 
-    if matches!(ext, "zip" | "rar" | "7z" | "tar" | "gz" | "bz2" | "xz")
-        || lower.contains("winrar")
+    if matches!(ext, "zip" | "rar" | "7z" | "tar" | "gz" | "bz2" | "xz") || lower.contains("winrar")
     {
         for (dy, color) in [
             (-3.5, egui::Color32::from_rgb(175, 82, 215)),
@@ -4139,11 +4108,9 @@ fn draw_add_download_dialog(app: &mut RajaUi, context: &egui::Context) {
             field_visuals.widgets.inactive.bg_stroke =
                 egui::Stroke::new(1.2, egui::Color32::from_rgb(225, 225, 230));
             field_visuals.widgets.hovered.bg_fill = egui::Color32::from_rgb(48, 48, 52);
-            field_visuals.widgets.hovered.bg_stroke =
-                egui::Stroke::new(1.3, egui::Color32::WHITE);
+            field_visuals.widgets.hovered.bg_stroke = egui::Stroke::new(1.3, egui::Color32::WHITE);
             field_visuals.widgets.active.bg_fill = egui::Color32::from_rgb(43, 43, 46);
-            field_visuals.widgets.active.bg_stroke =
-                egui::Stroke::new(1.5, egui::Color32::WHITE);
+            field_visuals.widgets.active.bg_stroke = egui::Stroke::new(1.5, egui::Color32::WHITE);
             ui.set_visuals(field_visuals);
 
             let label_w = 72.0;
@@ -4234,9 +4201,9 @@ fn draw_add_download_dialog(app: &mut RajaUi, context: &egui::Context) {
                                 }
                             });
                         if app.add_dialog_category != prev_cat {
-                            app.video_page_download =
-                                app.add_dialog_category == AddFileCategory::Video
-                                    && is_likely_video_page_url(&app.url);
+                            app.video_page_download = app.add_dialog_category
+                                == AddFileCategory::Video
+                                && is_likely_video_page_url(&app.url);
                             app.add_category_dir = category_directory_path(
                                 &app.default_download_directory,
                                 app.add_dialog_category,
@@ -4270,10 +4237,8 @@ fn draw_add_download_dialog(app: &mut RajaUi, context: &egui::Context) {
                                         .and_then(|n| n.to_str())
                                         .map(str::to_owned)
                                         .unwrap_or_else(|| suggested_filename(&app.url));
-                                    app.output = folder
-                                        .join(cur_name)
-                                        .to_string_lossy()
-                                        .into_owned();
+                                    app.output =
+                                        folder.join(cur_name).to_string_lossy().into_owned();
                                 }
                             }
                         }
@@ -4348,10 +4313,8 @@ fn draw_add_download_dialog(app: &mut RajaUi, context: &egui::Context) {
                         ui.add_space(label_w + 6.0);
                         let box_w = form_w - label_w - 8.0;
                         let box_h = 54.0;
-                        let (group_rect, _) = ui.allocate_exact_size(
-                            egui::vec2(box_w, box_h),
-                            egui::Sense::hover(),
-                        );
+                        let (group_rect, _) =
+                            ui.allocate_exact_size(egui::vec2(box_w, box_h), egui::Sense::hover());
                         let border_rect = egui::Rect::from_min_max(
                             egui::pos2(group_rect.left(), group_rect.top() + 8.0),
                             group_rect.max,
@@ -4424,11 +4387,7 @@ fn draw_add_download_dialog(app: &mut RajaUi, context: &egui::Context) {
                     ui.add_space(34.0);
                     let (icon_rect, _) =
                         ui.allocate_exact_size(egui::vec2(54.0, 54.0), egui::Sense::hover());
-                    paint_file_info_large_icon(
-                        ui.painter(),
-                        icon_rect,
-                        app.add_dialog_category,
-                    );
+                    paint_file_info_large_icon(ui.painter(), icon_rect, app.add_dialog_category);
                     ui.add_space(8.0);
                     let size_label = app
                         .add_dialog_file_size
@@ -4621,7 +4580,11 @@ fn draw_torrent_dialog(app: &mut RajaUi, context: &egui::Context) {
                     [ui.available_width() - 36.0, 21.0],
                     egui::TextEdit::singleline(&mut app.torrent_output_dir),
                 );
-                if ui.button("...").on_hover_text("Browse save folder").clicked() {
+                if ui
+                    .button("...")
+                    .on_hover_text("Browse save folder")
+                    .clicked()
+                {
                     #[cfg(windows)]
                     {
                         let mut dialog = rfd::FileDialog::new();
@@ -4649,10 +4612,7 @@ fn draw_torrent_dialog(app: &mut RajaUi, context: &egui::Context) {
                         )
                         .min_size(egui::vec2(78.0, 22.0))
                         .fill(egui::Color32::from_rgb(48, 48, 52))
-                        .stroke(egui::Stroke::new(
-                            1.0,
-                            egui::Color32::from_rgb(95, 95, 100),
-                        )),
+                        .stroke(egui::Stroke::new(1.0, egui::Color32::from_rgb(95, 95, 100))),
                     )
                     .clicked()
                 {
@@ -4672,10 +4632,7 @@ fn draw_torrent_dialog(app: &mut RajaUi, context: &egui::Context) {
                         )
                         .min_size(egui::vec2(84.0, 22.0))
                         .fill(egui::Color32::from_rgb(48, 48, 52))
-                        .stroke(egui::Stroke::new(
-                            1.0,
-                            egui::Color32::from_rgb(95, 95, 100),
-                        )),
+                        .stroke(egui::Stroke::new(1.0, egui::Color32::from_rgb(95, 95, 100))),
                     )
                     .clicked()
                 {
@@ -4687,10 +4644,8 @@ fn draw_torrent_dialog(app: &mut RajaUi, context: &egui::Context) {
 
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     let filter_w = 240.0;
-                    let (search_rect, _) = ui.allocate_exact_size(
-                        egui::vec2(filter_w, 22.0),
-                        egui::Sense::hover(),
-                    );
+                    let (search_rect, _) =
+                        ui.allocate_exact_size(egui::vec2(filter_w, 22.0), egui::Sense::hover());
                     ui.painter().rect(
                         search_rect,
                         3.0,
@@ -4699,7 +4654,8 @@ fn draw_torrent_dialog(app: &mut RajaUi, context: &egui::Context) {
                         egui::StrokeKind::Inside,
                     );
                     // Magnifying glass icon
-                    let lens_c = egui::pos2(search_rect.left() + 11.0, search_rect.center().y - 1.0);
+                    let lens_c =
+                        egui::pos2(search_rect.left() + 11.0, search_rect.center().y - 1.0);
                     let lens_color = egui::Color32::from_rgb(45, 145, 235);
                     ui.painter()
                         .circle_stroke(lens_c, 4.2, egui::Stroke::new(1.5, lens_color));
@@ -4858,10 +4814,7 @@ fn draw_torrent_dialog(app: &mut RajaUi, context: &egui::Context) {
                             )
                             .min_size(egui::vec2(82.0, 24.0))
                             .fill(egui::Color32::from_rgb(48, 48, 52))
-                            .stroke(egui::Stroke::new(
-                                1.0,
-                                egui::Color32::from_rgb(95, 95, 100),
-                            )),
+                            .stroke(egui::Stroke::new(1.0, egui::Color32::from_rgb(95, 95, 100))),
                         )
                         .clicked()
                     {
@@ -4896,8 +4849,7 @@ fn draw_torrent_dialog(app: &mut RajaUi, context: &egui::Context) {
         if app.torrent_source.trim().is_empty() {
             #[cfg(windows)]
             {
-                let mut dialog =
-                    rfd::FileDialog::new().add_filter("BitTorrent File", &["torrent"]);
+                let mut dialog = rfd::FileDialog::new().add_filter("BitTorrent File", &["torrent"]);
                 let default_dir = PathBuf::from(&app.default_download_directory);
                 if default_dir.is_dir() {
                     dialog = dialog.set_directory(default_dir);
@@ -4914,8 +4866,7 @@ fn draw_torrent_dialog(app: &mut RajaUi, context: &egui::Context) {
             }
             #[cfg(not(windows))]
             {
-                app.status =
-                    "Please enter a .torrent path or magnet:?xt=... link.".to_owned();
+                app.status = "Please enter a .torrent path or magnet:?xt=... link.".to_owned();
                 return;
             }
         }
@@ -5278,7 +5229,10 @@ fn draw_properties_dialog(app: &mut RajaUi, context: &egui::Context) {
         .frame(
             egui::Frame::new()
                 .fill(egui::Color32::from_rgb(240, 240, 240))
-                .stroke(egui::Stroke::new(1.0, egui::Color32::from_rgb(145, 145, 150)))
+                .stroke(egui::Stroke::new(
+                    1.0,
+                    egui::Color32::from_rgb(145, 145, 150),
+                ))
                 .inner_margin(egui::Margin::symmetric(12, 10)),
         )
         .show(context, |ui| {
@@ -6078,13 +6032,19 @@ fn suggested_torrent_name(source: &str) -> String {
     let trimmed = source.trim();
     if trimmed.to_ascii_lowercase().starts_with("magnet:?") {
         if let Ok(parsed) = reqwest::Url::parse(trimmed) {
-            if let Some((_, dn)) = parsed.query_pairs().find(|(k, _)| k.eq_ignore_ascii_case("dn")) {
+            if let Some((_, dn)) = parsed
+                .query_pairs()
+                .find(|(k, _)| k.eq_ignore_ascii_case("dn"))
+            {
                 let cleaned = sanitize_display_filename(&dn.replace('+', " "));
                 if !cleaned.is_empty() {
                     return cleaned;
                 }
             }
-            if let Some((_, xt)) = parsed.query_pairs().find(|(k, _)| k.eq_ignore_ascii_case("xt")) {
+            if let Some((_, xt)) = parsed
+                .query_pairs()
+                .find(|(k, _)| k.eq_ignore_ascii_case("xt"))
+            {
                 let hash = xt
                     .rsplit(':')
                     .next()
@@ -6184,11 +6144,7 @@ fn format_iec_bytes(bytes: u64) -> String {
         format!("{:.2} GiB", b / GIB)
     } else if b >= MIB {
         let m = b / MIB;
-        if m >= 100.0 {
-            format!("{m:.1} MiB")
-        } else {
-            format!("{m:.1} MiB")
-        }
+        format!("{m:.1} MiB")
     } else if b >= KIB {
         format!("{:.1} KiB", b / KIB)
     } else {
@@ -6270,7 +6226,10 @@ fn paint_file_info_large_icon(
                     egui::pos2(center.x - 2.0, center.y - 18.5),
                     egui::pos2(center.x - 11.0, center.y + 14.0),
                 ],
-                egui::Stroke::new(1.6, egui::Color32::from_rgba_unmultiplied(255, 230, 180, 120)),
+                egui::Stroke::new(
+                    1.6,
+                    egui::Color32::from_rgba_unmultiplied(255, 230, 180, 120),
+                ),
             );
         }
         AddFileCategory::Compressed => {
@@ -6281,10 +6240,8 @@ fn paint_file_info_large_icon(
             ];
             for (idx, col) in colors.iter().enumerate() {
                 let y = center.y - 14.0 + (idx as f32) * 10.0;
-                let r = egui::Rect::from_center_size(
-                    egui::pos2(center.x, y),
-                    egui::vec2(32.0, 9.0),
-                );
+                let r =
+                    egui::Rect::from_center_size(egui::pos2(center.x, y), egui::vec2(32.0, 9.0));
                 painter.rect_filled(r, 2.0, *col);
             }
             painter.rect_filled(
@@ -6405,19 +6362,11 @@ fn draw_torrent_tree_rows(
     }
 
     if !root_collapsed {
-        draw_torrent_folder_children(
-            app,
-            ui,
-            &[],
-            1,
-            &filter_lower,
-            name_w,
-            size_w,
-            priority_w,
-        );
+        draw_torrent_folder_children(app, ui, &[], 1, &filter_lower, name_w, size_w, priority_w);
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn draw_torrent_folder_children(
     app: &mut RajaUi,
     ui: &mut egui::Ui,
@@ -6447,9 +6396,9 @@ fn draw_torrent_folder_children(
         }
     }
     if app.torrent_sort_ascending {
-        subfolders.sort_by(|a, b| a.to_ascii_lowercase().cmp(&b.to_ascii_lowercase()));
+        subfolders.sort_by_key(|a| a.to_ascii_lowercase());
     } else {
-        subfolders.sort_by(|a, b| b.to_ascii_lowercase().cmp(&a.to_ascii_lowercase()));
+        subfolders.sort_by_key(|a| std::cmp::Reverse(a.to_ascii_lowercase()));
     }
 
     for sub in subfolders {
@@ -6613,13 +6562,10 @@ fn draw_torrent_folder_children(
     }
 }
 
-fn common_folder_priority(
-    files: &[TorrentFileEntry],
-    prefix: &[String],
-) -> TorrentFilePriority {
-    let mut iter = files.iter().filter(|f| {
-        f.rel_path.len() >= prefix.len() && f.rel_path[..prefix.len()] == *prefix
-    });
+fn common_folder_priority(files: &[TorrentFileEntry], prefix: &[String]) -> TorrentFilePriority {
+    let mut iter = files
+        .iter()
+        .filter(|f| f.rel_path.len() >= prefix.len() && f.rel_path[..prefix.len()] == *prefix);
     let Some(first) = iter.next() else {
         return TorrentFilePriority::Normal;
     };
@@ -6658,11 +6604,8 @@ fn draw_single_torrent_tree_row(
     let (row_rect, row_resp) =
         ui.allocate_exact_size(egui::vec2(total_w, row_h), egui::Sense::hover());
     if row_resp.hovered() {
-        ui.painter().rect_filled(
-            row_rect,
-            0.0,
-            egui::Color32::from_rgb(42, 44, 50),
-        );
+        ui.painter()
+            .rect_filled(row_rect, 0.0, egui::Color32::from_rgb(42, 44, 50));
     }
 
     let indent = row_rect.left() + 6.0 + (depth as f32) * 18.0;
@@ -6699,8 +6642,11 @@ fn draw_single_torrent_tree_row(
                 egui::pos2(cx - 1.8, cy + 3.5),
             ]
         };
-        ui.painter()
-            .add(egui::Shape::convex_polygon(pts, tri_col, egui::Stroke::NONE));
+        ui.painter().add(egui::Shape::convex_polygon(
+            pts,
+            tri_col,
+            egui::Stroke::NONE,
+        ));
         if tri_resp.clicked() {
             action = TorrentRowAction::ToggleExpand;
         }
@@ -6722,11 +6668,17 @@ fn draw_single_torrent_tree_row(
         let cx = check_rect.center().x;
         let cy = check_rect.center().y;
         ui.painter().line_segment(
-            [egui::pos2(cx - 4.0, cy + 0.2), egui::pos2(cx - 1.0, cy + 3.4)],
+            [
+                egui::pos2(cx - 4.0, cy + 0.2),
+                egui::pos2(cx - 1.0, cy + 3.4),
+            ],
             s,
         );
         ui.painter().line_segment(
-            [egui::pos2(cx - 1.0, cy + 3.4), egui::pos2(cx + 4.4, cy - 3.2)],
+            [
+                egui::pos2(cx - 1.0, cy + 3.4),
+                egui::pos2(cx + 4.4, cy - 3.2),
+            ],
             s,
         );
     } else {
@@ -6770,15 +6722,13 @@ fn draw_single_torrent_tree_row(
     } else {
         egui::Color32::from_rgb(145, 145, 152)
     };
-    ui.painter()
-        .with_clip_rect(name_rect)
-        .text(
-            egui::pos2(text_x, row_rect.center().y),
-            egui::Align2::LEFT_CENTER,
-            name,
-            egui::FontId::proportional(12.0),
-            text_color,
-        );
+    ui.painter().with_clip_rect(name_rect).text(
+        egui::pos2(text_x, row_rect.center().y),
+        egui::Align2::LEFT_CENTER,
+        name,
+        egui::FontId::proportional(12.0),
+        text_color,
+    );
 
     // 5. Total Size column
     let size_right_x = row_rect.left() + name_w + size_w - 6.0;
@@ -6820,12 +6770,7 @@ fn draw_single_torrent_tree_row(
     action
 }
 
-fn paint_torrent_file_icon(
-    painter: &egui::Painter,
-    rect: egui::Rect,
-    is_folder: bool,
-    name: &str,
-) {
+fn paint_torrent_file_icon(painter: &egui::Painter, rect: egui::Rect, is_folder: bool, name: &str) {
     let c = rect.center();
     if is_folder {
         // Golden yellow folder icon
@@ -7009,13 +6954,11 @@ fn parse_bencode(input: &[u8], pos: &mut usize) -> Option<BencodeVal> {
     }
 }
 
-fn parse_torrent_file(
-    path: &std::path::Path,
-) -> Result<(String, Vec<TorrentFileEntry>), String> {
+fn parse_torrent_file(path: &std::path::Path) -> Result<(String, Vec<TorrentFileEntry>), String> {
     let raw = std::fs::read(path).map_err(|e| format!("Could not read .torrent file: {e}"))?;
     let mut pos = 0;
-    let root = parse_bencode(&raw, &mut pos)
-        .ok_or_else(|| "Invalid .torrent bencode data.".to_owned())?;
+    let root =
+        parse_bencode(&raw, &mut pos).ok_or_else(|| "Invalid .torrent bencode data.".to_owned())?;
     let info = root
         .dict_get(b"info")
         .ok_or_else(|| "Torrent is missing 'info' dictionary.".to_owned())?;
@@ -7244,12 +7187,11 @@ fn main() -> eframe::Result<()> {
                 std::thread::spawn(move || {
                     loop {
                         std::thread::sleep(Duration::from_millis(250));
-                        let has_request = std::fs::read_dir(&inbox_dir)
-                            .ok()
-                            .is_some_and(|entries| {
-                                entries.flatten().any(|e| {
-                                    e.path().extension().is_some_and(|ext| ext == "json")
-                                })
+                        let has_request =
+                            std::fs::read_dir(&inbox_dir).ok().is_some_and(|entries| {
+                                entries
+                                    .flatten()
+                                    .any(|e| e.path().extension().is_some_and(|ext| ext == "json"))
                             });
                         if has_request {
                             ctx.send_viewport_cmd(egui::ViewportCommand::Visible(true));
@@ -7580,14 +7522,26 @@ mod tests {
         let app_icon = super::render_3d_app_icon(64);
         assert_eq!(app_icon.len(), 64 * 64 * 4);
         assert_eq!(app_icon[3], 0);
-        assert!(app_icon.chunks_exact(4).any(|px| px[3] == 255 && px[0] > 200));
+        assert!(
+            app_icon
+                .as_chunks::<4>()
+                .0
+                .iter()
+                .any(|px| px[3] == 255 && px[0] > 200)
+        );
 
         #[cfg(windows)]
         {
             let tray_icon = super::tray::render_3d_tray_icon(64);
             assert_eq!(tray_icon.len(), 64 * 64 * 4);
             assert_eq!(tray_icon[3], 0);
-            assert!(tray_icon.chunks_exact(4).any(|px| px[3] == 255 && px[0] > 200));
+            assert!(
+                tray_icon
+                    .as_chunks::<4>()
+                    .0
+                    .iter()
+                    .any(|px| px[3] == 255 && px[0] > 200)
+            );
         }
     }
 
@@ -7605,7 +7559,9 @@ mod tests {
             Some((10_485_760, Some(41_943_040)))
         );
         assert_eq!(
-            super::parse_aria2_complete_path("Download complete: C:/Downloads/Ubuntu 24.04 Desktop.iso"),
+            super::parse_aria2_complete_path(
+                "Download complete: C:/Downloads/Ubuntu 24.04 Desktop.iso"
+            ),
             Some("C:/Downloads/Ubuntu 24.04 Desktop.iso".to_owned())
         );
         assert_eq!(

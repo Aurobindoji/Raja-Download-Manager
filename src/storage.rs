@@ -649,8 +649,7 @@ impl Storage {
         let transaction = self
             .connection
             .transaction_with_behavior(TransactionBehavior::Immediate)?;
-        let deleted =
-            transaction.execute("DELETE FROM downloads WHERE id = ?1", [download_id])?;
+        let deleted = transaction.execute("DELETE FROM downloads WHERE id = ?1", [download_id])?;
         if deleted == 0 {
             return Err(StorageError::DownloadNotFound(download_id));
         }

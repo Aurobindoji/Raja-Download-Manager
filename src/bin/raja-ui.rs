@@ -1,5 +1,7 @@
 #![cfg_attr(target_os = "windows", windows_subsystem = "windows")]
 
+#[path = "raja_ui/theme.rs"]
+mod theme;
 #[cfg(windows)]
 #[path = "raja_ui/tray.rs"]
 mod tray;
@@ -15,6 +17,7 @@ use std::time::{Duration, Instant};
 
 use eframe::egui;
 use raja_core::storage::{DownloadSummary, Storage};
+use theme::{Theme, fixed_rgb, rgb};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum AddFileCategory {
@@ -171,6 +174,9 @@ struct RajaUi {
     update_rx: Option<Receiver<UpdateEvent>>,
     /// The once-a-day automatic check has been considered this session.
     auto_update_considered: bool,
+    /// Colour theme, and when the Windows title bars were last styled.
+    theme: Theme,
+    window_chrome_at: Option<Instant>,
     children: Vec<RunningProcess>,
     queue: VecDeque<i64>,
     queue_running: bool,
@@ -398,6 +404,10 @@ impl RajaUi {
         // anything still "active" now was interrupted by an earlier shutdown.
         init_storage.pause_interrupted_downloads()?;
         let saved_directory = init_storage.setting("download_directory")?;
+        let saved_theme = init_storage
+            .setting("theme")?
+            .map_or(Theme::Dark, |key| Theme::from_key(&key));
+        theme::set_current(saved_theme);
         let saved_max_conn = init_storage
             .setting("max_connections")?
             .and_then(|v| v.trim().parse::<u32>().ok())
@@ -469,6 +479,8 @@ impl RajaUi {
             show_update_dialog: false,
             update_rx: None,
             auto_update_considered: false,
+            theme: saved_theme,
+            window_chrome_at: None,
             children: Vec::new(),
             queue: VecDeque::new(),
             queue_running: false,
@@ -992,7 +1004,7 @@ impl RajaUi {
                 return None;
             }
             egui::CentralPanel::default()
-                .frame(egui::Frame::new().fill(egui::Color32::from_rgb(35, 35, 38)))
+                .frame(egui::Frame::new().fill(rgb(35, 35, 38)))
                 .show(ui, |_ui| {});
             self.dialog_in_own_window = true;
             let rect = match view {
@@ -1009,6 +1021,18 @@ impl RajaUi {
             if (wanted - size).abs().max_elem() > 1.0 {
                 self.own_window_size.insert(slot, wanted);
             }
+        }
+    }
+
+    fn set_theme(&mut self, theme: Theme) {
+        self.theme = theme;
+        theme::set_current(theme);
+        theme::apply_window_chrome(theme);
+        self.window_chrome_at = Some(Instant::now());
+        if let Err(error) = Storage::open(&self.database)
+            .and_then(|mut storage| storage.set_setting("theme", theme.key()))
+        {
+            self.status = format!("Could not save the theme: {error}");
         }
     }
 
@@ -1814,7 +1838,7 @@ impl RajaUi {
         }
 
         egui::CentralPanel::default()
-            .frame(egui::Frame::new().fill(egui::Color32::from_rgb(35, 35, 38)))
+            .frame(egui::Frame::new().fill(rgb(35, 35, 38)))
             .show(ui, |_ui| {});
 
         let rect = match self.compact_view {
@@ -2580,6 +2604,12 @@ impl RajaUi {
 }
 
 impl eframe::App for RajaUi {
+    /// Shows through the thin gaps between menu bar, toolbar and panels, so
+    /// it acts as their divider line.
+    fn clear_color(&self, _visuals: &egui::Visuals) -> [f32; 4] {
+        theme::divider_colour(self.theme).to_normalized_gamma_f32()
+    }
+
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         let context = ui.ctx().clone();
         #[cfg(windows)]
@@ -2616,13 +2646,20 @@ impl eframe::App for RajaUi {
             }
         }
 
-        let mut visuals = egui::Visuals::dark();
-        visuals.panel_fill = egui::Color32::from_rgb(45, 45, 48);
-        visuals.window_fill = egui::Color32::from_rgb(37, 37, 40);
-        visuals.extreme_bg_color = egui::Color32::from_rgb(25, 25, 25);
-        visuals.override_text_color = Some(egui::Color32::from_rgb(230, 230, 230));
-        visuals.widgets.noninteractive.bg_stroke =
-            egui::Stroke::new(1.0, egui::Color32::from_rgb(85, 85, 88));
+        // Native title bars follow the theme (also new download boxes).
+        if self
+            .window_chrome_at
+            .is_none_or(|at| at.elapsed() > Duration::from_secs(2))
+        {
+            self.window_chrome_at = Some(Instant::now());
+            theme::apply_window_chrome(self.theme);
+        }
+        let mut visuals = theme::base_visuals(self.theme);
+        visuals.panel_fill = rgb(45, 45, 48);
+        visuals.window_fill = rgb(37, 37, 40);
+        visuals.extreme_bg_color = rgb(25, 25, 25);
+        visuals.override_text_color = Some(rgb(230, 230, 230));
+        visuals.widgets.noninteractive.bg_stroke = egui::Stroke::new(1.0, rgb(85, 85, 88));
         context.set_visuals(visuals);
 
         #[cfg(windows)]
@@ -2643,7 +2680,7 @@ impl eframe::App for RajaUi {
                 .exact_size(20.0)
                 .frame(
                     egui::Frame::new()
-                        .fill(egui::Color32::from_rgb(30, 30, 32))
+                        .fill(rgb(30, 30, 32))
                         .inner_margin(egui::Margin::symmetric(8, 2)),
                 )
                 .show(ui, |ui| {
@@ -2651,13 +2688,13 @@ impl eframe::App for RajaUi {
                         ui.label(
                             egui::RichText::new(&self.status)
                                 .size(11.5)
-                                .color(egui::Color32::from_rgb(200, 200, 205)),
+                                .color(rgb(200, 200, 205)),
                         );
                         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                             ui.label(
                                 egui::RichText::new(format!("{} item(s)", self.downloads.len()))
                                     .size(11.5)
-                                    .color(egui::Color32::from_rgb(165, 165, 170)),
+                                    .color(rgb(165, 165, 170)),
                             );
                         });
                     });
@@ -2673,7 +2710,7 @@ impl eframe::App for RajaUi {
                 .show_separator_line(false)
                 .frame(
                     egui::Frame::new()
-                        .fill(egui::Color32::from_rgb(45, 45, 48))
+                        .fill(rgb(45, 45, 48))
                         .inner_margin(egui::Margin {
                             left: 3,
                             right: 2,
@@ -2687,7 +2724,7 @@ impl eframe::App for RajaUi {
         egui::CentralPanel::default()
             .frame(
                 egui::Frame::new()
-                    .fill(egui::Color32::from_rgb(45, 45, 48))
+                    .fill(rgb(45, 45, 48))
                     .inner_margin(egui::Margin {
                         left: if self.show_categories_panel { 2 } else { 3 },
                         right: 3,
@@ -2761,8 +2798,9 @@ impl eframe::App for RajaUi {
 }
 
 fn draw_menu_bar(app: &mut RajaUi, ui: &mut egui::Ui) {
+    let menu_background = ui.painter().add(egui::Shape::Noop);
     let frame_resp = egui::Frame::new()
-        .fill(egui::Color32::from_rgb(25, 25, 25))
+        .fill(egui::Color32::TRANSPARENT)
         .inner_margin(egui::Margin::symmetric(6, 3))
         .show(ui, |ui| {
             ui.set_min_width(ui.available_width());
@@ -2897,6 +2935,14 @@ fn draw_menu_bar(app: &mut RajaUi, ui: &mut egui::Ui) {
                     }
                 });
                 ui.menu_button(menu_title("V", "iew"), |ui| {
+                    ui.label("Theme");
+                    for choice in Theme::ALL {
+                        if ui.radio(app.theme == choice, choice.label()).clicked() {
+                            app.set_theme(choice);
+                            ui.close();
+                        }
+                    }
+                    ui.separator();
                     if ui
                         .checkbox(&mut app.show_categories_panel, "Categories")
                         .clicked()
@@ -2946,19 +2992,23 @@ fn draw_menu_bar(app: &mut RajaUi, ui: &mut egui::Ui) {
             });
         });
     let rect = frame_resp.response.rect;
+    ui.painter().set(
+        menu_background,
+        theme::chrome_background(rect, egui::Color32::from_rgb(25, 25, 25)),
+    );
     ui.painter().line_segment(
         [
             egui::pos2(rect.left(), rect.bottom()),
             egui::pos2(rect.right(), rect.bottom()),
         ],
-        egui::Stroke::new(1.0, egui::Color32::from_rgb(205, 205, 205)),
+        egui::Stroke::new(1.0, rgb(205, 205, 205)),
     );
 }
 
 fn menu_title(underlined: &str, rest: &str) -> egui::WidgetText {
     let mut job = egui::text::LayoutJob::default();
     let font_id = egui::FontId::proportional(12.5);
-    let color = egui::Color32::from_rgb(235, 235, 235);
+    let color = rgb(235, 235, 235);
     job.append(
         underlined,
         0.0,
@@ -3023,8 +3073,9 @@ fn draw_toolbar(app: &mut RajaUi, ui: &mut egui::Ui) {
         .iter()
         .any(|download| matches!(download.status.as_str(), "queued" | "paused" | "failed"));
 
-    egui::Frame::new()
-        .fill(egui::Color32::from_rgb(45, 45, 48))
+    let toolbar_background = ui.painter().add(egui::Shape::Noop);
+    let toolbar = egui::Frame::new()
+        .fill(egui::Color32::TRANSPARENT)
         .inner_margin(egui::Margin {
             left: 4,
             right: 8,
@@ -3142,6 +3193,10 @@ fn draw_toolbar(app: &mut RajaUi, ui: &mut egui::Ui) {
                 }
             });
         });
+    ui.painter().set(
+        toolbar_background,
+        theme::chrome_background(toolbar.response.rect, egui::Color32::from_rgb(45, 45, 48)),
+    );
 }
 
 fn draw_toolbar_button(
@@ -3166,8 +3221,8 @@ fn draw_toolbar_button(
         painter.rect(
             rect.shrink(1.0),
             3.0,
-            egui::Color32::from_rgb(58, 58, 62),
-            egui::Stroke::new(1.0, egui::Color32::from_rgb(85, 85, 90)),
+            rgb(58, 58, 62),
+            egui::Stroke::new(1.0, rgb(85, 85, 90)),
             egui::StrokeKind::Inside,
         );
     }
@@ -3181,9 +3236,9 @@ fn draw_toolbar_button(
         let arrow_x = rect.right() - 7.0;
         let arrow_y = rect.top() + 21.0;
         let arrow_color = if enabled {
-            egui::Color32::from_rgb(150, 150, 155)
+            rgb(150, 150, 155)
         } else {
-            egui::Color32::from_rgb(95, 95, 100)
+            rgb(95, 95, 100)
         };
         painter.add(egui::Shape::convex_polygon(
             vec![
@@ -3197,9 +3252,9 @@ fn draw_toolbar_button(
     }
 
     let text_color = if enabled {
-        egui::Color32::from_rgb(215, 215, 220)
+        rgb(215, 215, 220)
     } else {
-        egui::Color32::from_rgb(130, 130, 134)
+        rgb(130, 130, 134)
     };
     painter.text(
         egui::pos2(
@@ -3220,11 +3275,11 @@ fn paint_toolbar_icon(
     center: egui::Pos2,
     enabled: bool,
 ) {
-    let disabled_stroke = egui::Color32::from_rgb(142, 142, 146);
+    let disabled_stroke = rgb(142, 142, 146);
     match icon {
         ToolbarIcon::AddUrl => {
             let color = if enabled {
-                egui::Color32::from_rgb(82, 166, 136)
+                rgb(82, 166, 136)
             } else {
                 disabled_stroke
             };
@@ -3251,7 +3306,7 @@ fn paint_toolbar_icon(
         }
         ToolbarIcon::Resume => {
             let color = if enabled {
-                egui::Color32::from_rgb(185, 195, 210)
+                rgb(185, 195, 210)
             } else {
                 disabled_stroke
             };
@@ -3281,7 +3336,7 @@ fn paint_toolbar_icon(
         }
         ToolbarIcon::Stop => {
             let color = if enabled {
-                egui::Color32::from_rgb(195, 185, 188)
+                rgb(195, 185, 188)
             } else {
                 disabled_stroke
             };
@@ -3297,7 +3352,7 @@ fn paint_toolbar_icon(
         }
         ToolbarIcon::StopAll => {
             let color = if enabled {
-                egui::Color32::from_rgb(185, 185, 190)
+                rgb(185, 185, 190)
             } else {
                 disabled_stroke
             };
@@ -3342,7 +3397,7 @@ fn paint_toolbar_icon(
         }
         ToolbarIcon::Delete => {
             let color = if enabled {
-                egui::Color32::from_rgb(188, 188, 192)
+                rgb(188, 188, 192)
             } else {
                 disabled_stroke
             };
@@ -3380,14 +3435,14 @@ fn paint_toolbar_icon(
         }
         ToolbarIcon::DeleteCompleted => {
             let bin_color = if enabled {
-                egui::Color32::from_rgb(206, 92, 138)
+                rgb(206, 92, 138)
             } else {
-                egui::Color32::from_rgb(155, 95, 120)
+                rgb(155, 95, 120)
             };
             let check_color = if enabled {
-                egui::Color32::from_rgb(86, 175, 140)
+                rgb(86, 175, 140)
             } else {
-                egui::Color32::from_rgb(100, 145, 125)
+                rgb(100, 145, 125)
             };
             let s = egui::Stroke::new(1.5, bin_color);
             let body = egui::Rect::from_min_max(
@@ -3428,7 +3483,7 @@ fn paint_toolbar_icon(
             );
         }
         ToolbarIcon::Options => {
-            let color = egui::Color32::from_rgb(142, 118, 195);
+            let color = rgb(142, 118, 195);
             let s = egui::Stroke::new(1.5, color);
             painter.circle_stroke(center, 4.2, s);
             painter.circle_stroke(center, 8.2, egui::Stroke::new(1.2, color));
@@ -3448,9 +3503,9 @@ fn paint_toolbar_icon(
             }
         }
         ToolbarIcon::Scheduler => {
-            let ring_color = egui::Color32::from_rgb(168, 138, 165);
-            let bell_color = egui::Color32::from_rgb(145, 122, 192);
-            let hand_color = egui::Color32::from_rgb(205, 152, 122);
+            let ring_color = rgb(168, 138, 165);
+            let bell_color = rgb(145, 122, 192);
+            let hand_color = rgb(205, 152, 122);
             painter.circle_stroke(center, 11.2, egui::Stroke::new(1.6, ring_color));
             for i in 0..8 {
                 let angle = (i as f32) * std::f32::consts::TAU / 8.0;
@@ -3471,8 +3526,8 @@ fn paint_toolbar_icon(
             }
         }
         ToolbarIcon::StartQueue => {
-            let box_color = egui::Color32::from_rgb(152, 156, 165);
-            let arrow_color = egui::Color32::from_rgb(82, 168, 152);
+            let box_color = rgb(152, 156, 165);
+            let arrow_color = rgb(82, 168, 152);
             let s = egui::Stroke::new(1.5, box_color);
             painter.rect_stroke(
                 egui::Rect::from_min_max(
@@ -3487,7 +3542,7 @@ fn paint_toolbar_icon(
                 egui::pos2(center.x - 6.5, center.y - 7.0),
                 egui::pos2(center.x + 8.5, center.y + 8.0),
             );
-            painter.rect_filled(front_rect, 2.0, egui::Color32::from_rgb(45, 45, 48));
+            painter.rect_filled(front_rect, 2.0, rgb(45, 45, 48));
             painter.rect_stroke(front_rect, 2.0, s, egui::StrokeKind::Inside);
             let as_stroke = egui::Stroke::new(1.6, arrow_color);
             painter.line_segment(
@@ -3513,8 +3568,8 @@ fn paint_toolbar_icon(
             );
         }
         ToolbarIcon::StopQueue => {
-            let box_color = egui::Color32::from_rgb(152, 156, 165);
-            let stop_color = egui::Color32::from_rgb(206, 92, 138);
+            let box_color = rgb(152, 156, 165);
+            let stop_color = rgb(206, 92, 138);
             let s = egui::Stroke::new(1.5, box_color);
             painter.rect_stroke(
                 egui::Rect::from_min_max(
@@ -3529,13 +3584,13 @@ fn paint_toolbar_icon(
                 egui::pos2(center.x - 6.5, center.y - 7.0),
                 egui::pos2(center.x + 7.5, center.y + 7.0),
             );
-            painter.rect_filled(front_rect, 2.0, egui::Color32::from_rgb(45, 45, 48));
+            painter.rect_filled(front_rect, 2.0, rgb(45, 45, 48));
             painter.rect_stroke(front_rect, 2.0, s, egui::StrokeKind::Inside);
             let stop_rect = egui::Rect::from_min_max(
                 egui::pos2(center.x + 2.5, center.y + 2.5),
                 egui::pos2(center.x + 10.5, center.y + 10.5),
             );
-            painter.rect_filled(stop_rect, 1.5, egui::Color32::from_rgb(45, 45, 48));
+            painter.rect_filled(stop_rect, 1.5, rgb(45, 45, 48));
             painter.rect_stroke(
                 stop_rect,
                 1.5,
@@ -3544,7 +3599,7 @@ fn paint_toolbar_icon(
             );
         }
         ToolbarIcon::TellFriend => {
-            let color = egui::Color32::from_rgb(112, 140, 198);
+            let color = rgb(112, 140, 198);
             let s = egui::Stroke::new(1.5, color);
             let cuff = egui::Rect::from_min_max(
                 egui::pos2(center.x - 10.5, center.y - 1.5),
@@ -3589,17 +3644,17 @@ fn paint_toolbar_icon(
         }
         ToolbarIcon::Torrent => {
             let magnet_color = if enabled {
-                egui::Color32::from_rgb(228, 92, 92)
+                rgb(228, 92, 92)
             } else {
                 disabled_stroke
             };
             let tip_color = if enabled {
-                egui::Color32::from_rgb(215, 225, 238)
+                rgb(215, 225, 238)
             } else {
                 disabled_stroke
             };
             let arrow_color = if enabled {
-                egui::Color32::from_rgb(76, 202, 134)
+                rgb(76, 202, 134)
             } else {
                 disabled_stroke
             };
@@ -3666,8 +3721,8 @@ fn draw_categories(app: &mut RajaUi, ui: &mut egui::Ui) {
     painter.rect(
         available,
         0.0,
-        egui::Color32::from_rgb(24, 24, 24),
-        egui::Stroke::new(1.0, egui::Color32::from_rgb(105, 105, 108)),
+        rgb(24, 24, 24),
+        egui::Stroke::new(1.0, rgb(105, 105, 108)),
         egui::StrokeKind::Inside,
     );
 
@@ -3685,13 +3740,13 @@ fn draw_categories(app: &mut RajaUi, ui: &mut egui::Ui) {
     );
     child_ui
         .painter()
-        .rect_filled(header_rect, 0.0, egui::Color32::from_rgb(28, 28, 30));
+        .rect_filled(header_rect, 0.0, rgb(28, 28, 30));
     child_ui.painter().text(
         egui::pos2(header_rect.left() + 5.0, header_rect.center().y),
         egui::Align2::LEFT_CENTER,
         "Categories",
         egui::FontId::proportional(12.0),
-        egui::Color32::from_rgb(225, 225, 225),
+        rgb(225, 225, 225),
     );
     let close_rect = egui::Rect::from_center_size(
         egui::pos2(header_rect.right() - 10.0, header_rect.center().y),
@@ -3700,9 +3755,9 @@ fn draw_categories(app: &mut RajaUi, ui: &mut egui::Ui) {
     let close_id = child_ui.make_persistent_id("close-categories-panel");
     let close_resp = child_ui.interact(close_rect, close_id, egui::Sense::click());
     let close_color = if close_resp.hovered() {
-        egui::Color32::WHITE
+        rgb(255, 255, 255)
     } else {
-        egui::Color32::from_rgb(200, 200, 200)
+        rgb(200, 200, 200)
     };
     let cs = egui::Stroke::new(1.3, close_color);
     child_ui.painter().line_segment(
@@ -3727,7 +3782,7 @@ fn draw_categories(app: &mut RajaUi, ui: &mut egui::Ui) {
             egui::pos2(header_rect.left(), header_rect.bottom()),
             egui::pos2(header_rect.right(), header_rect.bottom()),
         ],
-        egui::Stroke::new(1.0, egui::Color32::from_rgb(105, 105, 108)),
+        egui::Stroke::new(1.0, rgb(105, 105, 108)),
     );
 
     child_ui.add_space(2.0);
@@ -3802,18 +3857,18 @@ fn draw_category_tree_row(
             egui::pos2(text_x - 2.0, rect.top() + 1.0),
             egui::pos2(rect.right() - 2.0, rect.bottom() - 1.0),
         );
-        painter.rect_filled(sel_rect, 1.0, egui::Color32::from_rgb(65, 65, 68));
+        painter.rect_filled(sel_rect, 1.0, rgb(65, 65, 68));
     } else if response.hovered() {
         let hov_rect = egui::Rect::from_min_max(
             egui::pos2(text_x - 2.0, rect.top() + 1.0),
             egui::pos2(rect.right() - 2.0, rect.bottom() - 1.0),
         );
-        painter.rect_filled(hov_rect, 1.0, egui::Color32::from_rgb(42, 42, 45));
+        painter.rect_filled(hov_rect, 1.0, rgb(42, 42, 45));
     }
 
     if depth == 0 {
         let chevron_center = egui::pos2(indent_x + 5.0, rect.center().y);
-        let chev_stroke = egui::Stroke::new(1.2, egui::Color32::from_rgb(190, 190, 195));
+        let chev_stroke = egui::Stroke::new(1.2, rgb(190, 190, 195));
         let is_open = expanded.as_deref().copied().unwrap_or(false);
         if is_open {
             painter.line_segment(
@@ -3848,7 +3903,7 @@ fn draw_category_tree_row(
         }
     } else {
         let tree_x = rect.left() + 25.0;
-        let dot_color = egui::Color32::from_rgb(115, 115, 120);
+        let dot_color = rgb(115, 115, 120);
         let y_end = if is_last_child {
             rect.center().y
         } else {
@@ -3873,7 +3928,7 @@ fn draw_category_tree_row(
         egui::Align2::LEFT_CENTER,
         category.label(),
         egui::FontId::proportional(12.0),
-        egui::Color32::from_rgb(230, 230, 230),
+        rgb(230, 230, 230),
     );
 
     if response.clicked() {
@@ -3890,8 +3945,8 @@ fn draw_category_tree_row(
 }
 
 fn paint_category_icon(painter: &egui::Painter, category: DownloadCategory, center: egui::Pos2) {
-    let folder_gold = egui::Color32::from_rgb(228, 188, 86);
-    let folder_dark = egui::Color32::from_rgb(176, 138, 46);
+    let folder_gold = rgb(228, 188, 86);
+    let folder_dark = rgb(176, 138, 46);
     let draw_folder = |painter: &egui::Painter| {
         let tab = egui::Rect::from_min_max(
             egui::pos2(center.x - 6.0, center.y - 5.5),
@@ -3914,7 +3969,7 @@ fn paint_category_icon(painter: &egui::Painter, category: DownloadCategory, cent
                 egui::pos2(center.x - 5.0, center.y - 5.5),
                 egui::pos2(center.x + 5.0, center.y + 5.5),
             );
-            painter.rect_filled(box_rect, 1.0, egui::Color32::from_rgb(218, 185, 115));
+            painter.rect_filled(box_rect, 1.0, rgb(218, 185, 115));
             painter.rect_stroke(
                 box_rect,
                 1.0,
@@ -3926,7 +3981,7 @@ fn paint_category_icon(painter: &egui::Painter, category: DownloadCategory, cent
                     egui::pos2(center.x, center.y - 5.0),
                     egui::pos2(center.x, center.y + 5.0),
                 ],
-                egui::Stroke::new(1.5, egui::Color32::from_rgb(110, 90, 50)),
+                egui::Stroke::new(1.5, rgb(110, 90, 50)),
             );
         }
         DownloadCategory::Documents => {
@@ -3934,19 +3989,19 @@ fn paint_category_icon(painter: &egui::Painter, category: DownloadCategory, cent
                 egui::pos2(center.x - 4.5, center.y - 6.0),
                 egui::pos2(center.x + 4.5, center.y + 6.0),
             );
-            painter.rect_filled(page, 1.0, egui::Color32::from_rgb(225, 232, 240));
+            painter.rect_filled(page, 1.0, rgb(225, 232, 240));
             for dy in [-2.5, 0.0, 2.5] {
                 painter.line_segment(
                     [
                         egui::pos2(center.x - 2.8, center.y + dy),
                         egui::pos2(center.x + 2.8, center.y + dy),
                     ],
-                    egui::Stroke::new(1.0, egui::Color32::from_rgb(120, 140, 165)),
+                    egui::Stroke::new(1.0, rgb(120, 140, 165)),
                 );
             }
         }
         DownloadCategory::Music => {
-            let blue = egui::Color32::from_rgb(95, 165, 235);
+            let blue = rgb(95, 165, 235);
             let s = egui::Stroke::new(1.5, blue);
             painter.circle_filled(egui::pos2(center.x - 3.0, center.y + 3.5), 2.3, blue);
             painter.circle_filled(egui::pos2(center.x + 3.0, center.y + 2.5), 2.3, blue);
@@ -3977,23 +4032,23 @@ fn paint_category_icon(painter: &egui::Painter, category: DownloadCategory, cent
                 egui::pos2(center.x - 5.5, center.y - 5.0),
                 egui::pos2(center.x + 5.5, center.y + 5.0),
             );
-            painter.rect_filled(win, 1.0, egui::Color32::from_rgb(205, 215, 228));
+            painter.rect_filled(win, 1.0, rgb(205, 215, 228));
             let title = egui::Rect::from_min_max(
                 egui::pos2(center.x - 5.5, center.y - 5.0),
                 egui::pos2(center.x + 5.5, center.y - 2.0),
             );
-            painter.rect_filled(title, 1.0, egui::Color32::from_rgb(70, 130, 200));
+            painter.rect_filled(title, 1.0, rgb(70, 130, 200));
         }
         DownloadCategory::Video => {
             let film = egui::Rect::from_min_max(
                 egui::pos2(center.x - 5.5, center.y - 5.0),
                 egui::pos2(center.x + 5.5, center.y + 5.0),
             );
-            painter.rect_filled(film, 1.0, egui::Color32::from_rgb(78, 175, 205));
+            painter.rect_filled(film, 1.0, rgb(78, 175, 205));
             painter.rect_stroke(
                 film,
                 1.0,
-                egui::Stroke::new(1.0, egui::Color32::from_rgb(40, 95, 130)),
+                egui::Stroke::new(1.0, rgb(40, 95, 130)),
                 egui::StrokeKind::Inside,
             );
             painter.line_segment(
@@ -4001,7 +4056,7 @@ fn paint_category_icon(painter: &egui::Painter, category: DownloadCategory, cent
                     egui::pos2(center.x - 5.0, center.y),
                     egui::pos2(center.x + 5.0, center.y),
                 ],
-                egui::Stroke::new(1.0, egui::Color32::from_rgb(40, 95, 130)),
+                egui::Stroke::new(1.0, rgb(40, 95, 130)),
             );
         }
         DownloadCategory::Unfinished => {
@@ -4010,7 +4065,7 @@ fn paint_category_icon(painter: &egui::Painter, category: DownloadCategory, cent
                 egui::pos2(center.x + 0.5, center.y - 0.5),
                 egui::pos2(center.x + 6.5, center.y + 5.5),
             );
-            painter.rect_filled(badge, 1.0, egui::Color32::from_rgb(92, 188, 92));
+            painter.rect_filled(badge, 1.0, rgb(92, 188, 92));
         }
         DownloadCategory::Finished => {
             draw_folder(painter);
@@ -4018,14 +4073,14 @@ fn paint_category_icon(painter: &egui::Painter, category: DownloadCategory, cent
                 egui::pos2(center.x + 0.5, center.y - 0.5),
                 egui::pos2(center.x + 6.5, center.y + 5.5),
             );
-            painter.rect_filled(badge, 1.5, egui::Color32::from_rgb(65, 135, 215));
+            painter.rect_filled(badge, 1.5, rgb(65, 135, 215));
         }
         DownloadCategory::GrabberProjects => {
             draw_folder(painter);
             painter.circle_filled(
                 egui::pos2(center.x + 3.2, center.y + 2.2),
                 3.2,
-                egui::Color32::from_rgb(72, 155, 218),
+                rgb(72, 155, 218),
             );
         }
         DownloadCategory::Queues => {
@@ -4033,7 +4088,7 @@ fn paint_category_icon(painter: &egui::Painter, category: DownloadCategory, cent
             painter.circle_filled(
                 egui::pos2(center.x + 3.2, center.y + 2.2),
                 3.0,
-                egui::Color32::from_rgb(135, 165, 205),
+                rgb(135, 165, 205),
             );
         }
     }
@@ -4041,10 +4096,10 @@ fn paint_category_icon(painter: &egui::Painter, category: DownloadCategory, cent
 
 fn draw_download_table(app: &mut RajaUi, ui: &mut egui::Ui) {
     let available = ui.available_rect_before_wrap();
-    let border_color = egui::Color32::from_rgb(105, 105, 108);
-    let grid_color = egui::Color32::from_rgb(58, 58, 60);
-    let table_bg = egui::Color32::from_rgb(33, 33, 35);
-    let header_bg = egui::Color32::from_rgb(38, 38, 40);
+    let border_color = rgb(105, 105, 108);
+    let grid_color = rgb(58, 58, 60);
+    let table_bg = rgb(33, 33, 35);
+    let header_bg = rgb(38, 38, 40);
 
     ui.painter().rect(
         available,
@@ -4096,7 +4151,7 @@ fn draw_download_table(app: &mut RajaUi, ui: &mut egui::Ui) {
             egui::Align2::LEFT_CENTER,
             *title,
             egui::FontId::proportional(12.0),
-            egui::Color32::from_rgb(228, 228, 232),
+            rgb(228, 228, 232),
         );
         cx += w;
         if cx < header_rect.right() {
@@ -4105,7 +4160,7 @@ fn draw_download_table(app: &mut RajaUi, ui: &mut egui::Ui) {
                     egui::pos2(cx, header_rect.top()),
                     egui::pos2(cx, header_rect.bottom()),
                 ],
-                egui::Stroke::new(1.0, egui::Color32::from_rgb(72, 72, 75)),
+                egui::Stroke::new(1.0, rgb(72, 72, 75)),
             );
         }
     }
@@ -4114,7 +4169,7 @@ fn draw_download_table(app: &mut RajaUi, ui: &mut egui::Ui) {
             egui::pos2(header_rect.left(), header_rect.bottom()),
             egui::pos2(header_rect.right(), header_rect.bottom()),
         ],
-        egui::Stroke::new(1.0, egui::Color32::from_rgb(78, 78, 82)),
+        egui::Stroke::new(1.0, rgb(78, 78, 82)),
     );
 
     let downloads = app
@@ -4162,9 +4217,9 @@ fn draw_download_table(app: &mut RajaUi, ui: &mut egui::Ui) {
                 if let Some(download) = downloads.get(row_idx) {
                     let selected = app.selected_download == Some(download.id);
                     if selected {
-                        rp.rect_filled(row_rect, 0.0, egui::Color32::from_rgb(56, 78, 108));
+                        rp.rect_filled(row_rect, 0.0, rgb(56, 78, 108));
                     } else if response.hovered() {
-                        rp.rect_filled(row_rect, 0.0, egui::Color32::from_rgb(42, 42, 46));
+                        rp.rect_filled(row_rect, 0.0, rgb(42, 42, 46));
                     }
 
                     if response.clicked() {
@@ -4445,7 +4500,7 @@ fn draw_download_table(app: &mut RajaUi, ui: &mut egui::Ui) {
                                 egui::Align2::LEFT_CENTER,
                                 *text,
                                 egui::FontId::proportional(12.0),
-                                egui::Color32::from_rgb(232, 232, 235),
+                                rgb(232, 232, 235),
                             );
                         } else if !text.is_empty() {
                             clipped.text(
@@ -4453,7 +4508,7 @@ fn draw_download_table(app: &mut RajaUi, ui: &mut egui::Ui) {
                                 egui::Align2::LEFT_CENTER,
                                 *text,
                                 egui::FontId::proportional(12.0),
-                                egui::Color32::from_rgb(225, 225, 228),
+                                rgb(225, 225, 228),
                             );
                         }
                         cell_x += w;
@@ -4544,7 +4599,7 @@ fn draw_download_table(app: &mut RajaUi, ui: &mut egui::Ui) {
                     egui::pos2(joint_x, header_rect.top()),
                     egui::pos2(joint_x, inner.bottom()),
                 ],
-                egui::Stroke::new(1.5, egui::Color32::from_rgb(110, 165, 235)),
+                egui::Stroke::new(1.5, rgb(110, 165, 235)),
             );
         }
         if joint_resp.dragged() {
@@ -4584,9 +4639,9 @@ fn paint_file_type_icon(painter: &egui::Painter, file_name: &str, center: egui::
     if matches!(ext, "zip" | "rar" | "7z" | "tar" | "gz" | "bz2" | "xz") || lower.contains("winrar")
     {
         for (dy, color) in [
-            (-3.5, egui::Color32::from_rgb(175, 82, 215)),
-            (0.0, egui::Color32::from_rgb(225, 72, 82)),
-            (3.5, egui::Color32::from_rgb(72, 185, 105)),
+            (-3.5, rgb(175, 82, 215)),
+            (0.0, rgb(225, 72, 82)),
+            (3.5, rgb(72, 185, 105)),
         ] {
             let r = egui::Rect::from_min_max(
                 egui::pos2(center.x - 5.5, center.y + dy - 1.6),
@@ -4599,27 +4654,27 @@ fn paint_file_type_icon(painter: &egui::Painter, file_name: &str, center: egui::
                 egui::pos2(center.x, center.y - 5.5),
                 egui::pos2(center.x, center.y + 5.5),
             ],
-            egui::Stroke::new(1.5, egui::Color32::from_rgb(235, 195, 70)),
+            egui::Stroke::new(1.5, rgb(235, 195, 70)),
         );
     } else if ext == "pdf" {
         let doc = egui::Rect::from_min_max(
             egui::pos2(center.x - 5.0, center.y - 6.0),
             egui::pos2(center.x + 5.0, center.y + 6.0),
         );
-        painter.rect_filled(doc, 1.2, egui::Color32::from_rgb(218, 52, 42));
+        painter.rect_filled(doc, 1.2, rgb(218, 52, 42));
         painter.line_segment(
             [
                 egui::pos2(center.x - 2.8, center.y + 2.5),
                 egui::pos2(center.x + 1.5, center.y - 3.0),
             ],
-            egui::Stroke::new(1.3, egui::Color32::WHITE),
+            egui::Stroke::new(1.3, rgb(255, 255, 255)),
         );
         painter.line_segment(
             [
                 egui::pos2(center.x - 2.8, center.y - 1.5),
                 egui::pos2(center.x + 2.8, center.y + 2.0),
             ],
-            egui::Stroke::new(1.3, egui::Color32::WHITE),
+            egui::Stroke::new(1.3, rgb(255, 255, 255)),
         );
     } else if matches!(
         ext,
@@ -4629,7 +4684,7 @@ fn paint_file_type_icon(painter: &egui::Painter, file_name: &str, center: egui::
             egui::pos2(center.x - 5.5, center.y + 3.5),
             egui::pos2(center.x + 5.5, center.y + 5.8),
         );
-        painter.rect_filled(base, 1.0, egui::Color32::from_rgb(238, 122, 28));
+        painter.rect_filled(base, 1.0, rgb(238, 122, 28));
         painter.add(egui::Shape::convex_polygon(
             vec![
                 egui::pos2(center.x - 1.2, center.y - 5.8),
@@ -4637,7 +4692,7 @@ fn paint_file_type_icon(painter: &egui::Painter, file_name: &str, center: egui::
                 egui::pos2(center.x + 4.2, center.y + 3.8),
                 egui::pos2(center.x - 4.2, center.y + 3.8),
             ],
-            egui::Color32::from_rgb(245, 132, 32),
+            rgb(245, 132, 32),
             egui::Stroke::NONE,
         ));
         for y in [-2.2, 0.8] {
@@ -4646,7 +4701,7 @@ fn paint_file_type_icon(painter: &egui::Painter, file_name: &str, center: egui::
                     egui::pos2(center.x - 2.4, center.y + y),
                     egui::pos2(center.x + 2.4, center.y + y),
                 ],
-                egui::Stroke::new(1.3, egui::Color32::WHITE),
+                egui::Stroke::new(1.3, rgb(255, 255, 255)),
             );
         }
     } else if ext == "msi" {
@@ -4654,16 +4709,16 @@ fn paint_file_type_icon(painter: &egui::Painter, file_name: &str, center: egui::
             egui::pos2(center.x - 5.5, center.y - 5.5),
             egui::pos2(center.x + 5.5, center.y + 3.5),
         );
-        painter.rect_filled(mon, 1.2, egui::Color32::from_rgb(65, 175, 225));
+        painter.rect_filled(mon, 1.2, rgb(65, 175, 225));
         let inner_mon = mon.shrink(1.5);
-        painter.rect_filled(inner_mon, 0.5, egui::Color32::from_rgb(32, 95, 145));
+        painter.rect_filled(inner_mon, 0.5, rgb(32, 95, 145));
         let box_pkg = egui::Rect::from_min_max(
             egui::pos2(center.x + 0.5, center.y),
             egui::pos2(center.x + 5.8, center.y + 5.8),
         );
-        painter.rect_filled(box_pkg, 1.0, egui::Color32::from_rgb(205, 212, 220));
+        painter.rect_filled(box_pkg, 1.0, rgb(205, 212, 220));
     } else if ext == "exe" {
-        let blue = egui::Color32::from_rgb(42, 148, 238);
+        let blue = rgb(42, 148, 238);
         let s = egui::Stroke::new(2.0, blue);
         painter.line_segment(
             [
@@ -4684,10 +4739,10 @@ fn paint_file_type_icon(painter: &egui::Painter, file_name: &str, center: egui::
                 egui::pos2(center.x + 3.8, center.y - 4.5),
                 egui::pos2(center.x + 3.8, center.y + 4.5),
             ],
-            egui::Stroke::new(2.2, egui::Color32::from_rgb(72, 172, 250)),
+            egui::Stroke::new(2.2, rgb(72, 172, 250)),
         );
     } else if matches!(ext, "mp3" | "flac" | "wav" | "m4a" | "aac" | "ogg") {
-        let blue = egui::Color32::from_rgb(95, 165, 235);
+        let blue = rgb(95, 165, 235);
         painter.circle_filled(egui::pos2(center.x - 2.0, center.y + 3.0), 2.5, blue);
         painter.line_segment(
             [
@@ -4704,26 +4759,26 @@ fn paint_file_type_icon(painter: &egui::Painter, file_name: &str, center: egui::
             egui::Stroke::new(2.0, blue),
         );
     } else if ext == "torrent" || lower.starts_with("magnet-") {
-        let green = egui::Color32::from_rgb(68, 198, 126);
-        painter.circle_filled(center, 5.5, egui::Color32::from_rgb(32, 96, 62));
+        let green = rgb(68, 198, 126);
+        painter.circle_filled(center, 5.5, rgb(32, 96, 62));
         painter.circle_stroke(center, 5.5, egui::Stroke::new(1.3, green));
         painter.line_segment(
             [
                 egui::pos2(center.x, center.y - 3.0),
                 egui::pos2(center.x, center.y + 2.8),
             ],
-            egui::Stroke::new(1.4, egui::Color32::WHITE),
+            egui::Stroke::new(1.4, rgb(255, 255, 255)),
         );
     } else {
         let doc = egui::Rect::from_min_max(
             egui::pos2(center.x - 4.5, center.y - 6.0),
             egui::pos2(center.x + 4.5, center.y + 6.0),
         );
-        painter.rect_filled(doc, 1.0, egui::Color32::from_rgb(232, 235, 240));
+        painter.rect_filled(doc, 1.0, rgb(232, 235, 240));
         painter.rect_stroke(
             doc,
             1.0,
-            egui::Stroke::new(1.0, egui::Color32::from_rgb(150, 155, 165)),
+            egui::Stroke::new(1.0, rgb(150, 155, 165)),
             egui::StrokeKind::Inside,
         );
     }
@@ -4751,11 +4806,11 @@ fn draw_add_download_dialog(app: &mut RajaUi, context: &egui::Context) -> Option
         .title_bar(!compact)
         .frame(
             egui::Frame::new()
-                .fill(egui::Color32::from_rgb(35, 35, 38))
+                .fill(rgb(35, 35, 38))
                 .stroke(if compact {
                     egui::Stroke::NONE
                 } else {
-                    egui::Stroke::new(1.0, egui::Color32::from_rgb(78, 78, 84))
+                    egui::Stroke::new(1.0, rgb(78, 78, 84))
                 })
                 .inner_margin(egui::Margin::symmetric(14, 12)),
         );
@@ -4770,14 +4825,13 @@ fn draw_add_download_dialog(app: &mut RajaUi, context: &egui::Context) -> Option
     let window_rect = window
         .show(context, |ui| {
             let mut field_visuals = ui.visuals().clone();
-            field_visuals.extreme_bg_color = egui::Color32::from_rgb(43, 43, 46);
-            field_visuals.widgets.inactive.bg_fill = egui::Color32::from_rgb(43, 43, 46);
-            field_visuals.widgets.inactive.bg_stroke =
-                egui::Stroke::new(1.2, egui::Color32::from_rgb(225, 225, 230));
-            field_visuals.widgets.hovered.bg_fill = egui::Color32::from_rgb(48, 48, 52);
-            field_visuals.widgets.hovered.bg_stroke = egui::Stroke::new(1.3, egui::Color32::WHITE);
-            field_visuals.widgets.active.bg_fill = egui::Color32::from_rgb(43, 43, 46);
-            field_visuals.widgets.active.bg_stroke = egui::Stroke::new(1.5, egui::Color32::WHITE);
+            field_visuals.extreme_bg_color = rgb(43, 43, 46);
+            field_visuals.widgets.inactive.bg_fill = rgb(43, 43, 46);
+            field_visuals.widgets.inactive.bg_stroke = egui::Stroke::new(1.2, rgb(225, 225, 230));
+            field_visuals.widgets.hovered.bg_fill = rgb(48, 48, 52);
+            field_visuals.widgets.hovered.bg_stroke = egui::Stroke::new(1.3, rgb(255, 255, 255));
+            field_visuals.widgets.active.bg_fill = rgb(43, 43, 46);
+            field_visuals.widgets.active.bg_stroke = egui::Stroke::new(1.5, rgb(255, 255, 255));
             ui.set_visuals(field_visuals);
 
             let label_w = 72.0;
@@ -4797,7 +4851,7 @@ fn draw_add_download_dialog(app: &mut RajaUi, context: &egui::Context) -> Option
                                 ui.label(
                                     egui::RichText::new("URL")
                                         .size(12.5)
-                                        .color(egui::Color32::from_rgb(235, 235, 238)),
+                                        .color(rgb(235, 235, 238)),
                                 );
                             },
                         );
@@ -4843,7 +4897,7 @@ fn draw_add_download_dialog(app: &mut RajaUi, context: &egui::Context) -> Option
                                 ui.label(
                                     egui::RichText::new("Category")
                                         .size(12.5)
-                                        .color(egui::Color32::from_rgb(235, 235, 238)),
+                                        .color(rgb(235, 235, 238)),
                                 );
                             },
                         );
@@ -4920,7 +4974,7 @@ fn draw_add_download_dialog(app: &mut RajaUi, context: &egui::Context) -> Option
                                 ui.label(
                                     egui::RichText::new("Save As")
                                         .size(12.5)
-                                        .color(egui::Color32::from_rgb(235, 235, 238)),
+                                        .color(rgb(235, 235, 238)),
                                 );
                             },
                         );
@@ -4989,7 +5043,7 @@ fn draw_add_download_dialog(app: &mut RajaUi, context: &egui::Context) -> Option
                         ui.painter().rect_stroke(
                             border_rect,
                             0.0,
-                            egui::Stroke::new(1.0, egui::Color32::from_rgb(135, 135, 140)),
+                            egui::Stroke::new(1.0, rgb(135, 135, 140)),
                             egui::StrokeKind::Inside,
                         );
                         let cat_label = app.add_dialog_category.label();
@@ -5000,11 +5054,7 @@ fn draw_add_download_dialog(app: &mut RajaUi, context: &egui::Context) -> Option
                             egui::pos2(group_rect.left() + 8.0, group_rect.top()),
                             egui::vec2(header_w, 18.0),
                         );
-                        ui.painter().rect_filled(
-                            header_rect,
-                            0.0,
-                            egui::Color32::from_rgb(35, 35, 38),
-                        );
+                        ui.painter().rect_filled(header_rect, 0.0, rgb(35, 35, 38));
                         let mut header_ui = ui.new_child(
                             egui::UiBuilder::new()
                                 .max_rect(header_rect)
@@ -5037,7 +5087,7 @@ fn draw_add_download_dialog(app: &mut RajaUi, context: &egui::Context) -> Option
                                 ui.label(
                                     egui::RichText::new("Description")
                                         .size(12.5)
-                                        .color(egui::Color32::from_rgb(235, 235, 238)),
+                                        .color(rgb(235, 235, 238)),
                                 );
                             },
                         );
@@ -5073,7 +5123,7 @@ fn draw_add_download_dialog(app: &mut RajaUi, context: &egui::Context) -> Option
                         ui.label(
                             egui::RichText::new(size_label)
                                 .size(13.0)
-                                .color(egui::Color32::from_rgb(240, 240, 242)),
+                                .color(rgb(240, 240, 242)),
                         );
                     }
                 });
@@ -5092,14 +5142,11 @@ fn draw_add_download_dialog(app: &mut RajaUi, context: &egui::Context) -> Option
                         egui::Button::new(
                             egui::RichText::new("Download Later")
                                 .size(12.5)
-                                .color(egui::Color32::from_rgb(235, 235, 240)),
+                                .color(rgb(235, 235, 240)),
                         )
                         .min_size(btn_size)
-                        .fill(egui::Color32::from_rgb(43, 43, 46))
-                        .stroke(egui::Stroke::new(
-                            1.0,
-                            egui::Color32::from_rgb(135, 135, 140),
-                        )),
+                        .fill(rgb(43, 43, 46))
+                        .stroke(egui::Stroke::new(1.0, rgb(135, 135, 140))),
                     )
                     .clicked();
                 ui.add_space(10.0);
@@ -5109,11 +5156,11 @@ fn draw_add_download_dialog(app: &mut RajaUi, context: &egui::Context) -> Option
                         egui::Button::new(
                             egui::RichText::new("Start Download")
                                 .size(12.5)
-                                .color(egui::Color32::WHITE),
+                                .color(rgb(255, 255, 255)),
                         )
                         .min_size(egui::vec2(146.0, 26.0))
-                        .fill(egui::Color32::from_rgb(45, 45, 48))
-                        .stroke(egui::Stroke::new(1.3, egui::Color32::WHITE)),
+                        .fill(rgb(45, 45, 48))
+                        .stroke(egui::Stroke::new(1.3, rgb(255, 255, 255))),
                     )
                     .clicked();
                 ui.add_space(10.0);
@@ -5122,14 +5169,11 @@ fn draw_add_download_dialog(app: &mut RajaUi, context: &egui::Context) -> Option
                         egui::Button::new(
                             egui::RichText::new("Cancel")
                                 .size(12.5)
-                                .color(egui::Color32::from_rgb(235, 235, 240)),
+                                .color(rgb(235, 235, 240)),
                         )
                         .min_size(btn_size)
-                        .fill(egui::Color32::from_rgb(43, 43, 46))
-                        .stroke(egui::Stroke::new(
-                            1.0,
-                            egui::Color32::from_rgb(135, 135, 140),
-                        )),
+                        .fill(rgb(43, 43, 46))
+                        .stroke(egui::Stroke::new(1.0, rgb(135, 135, 140))),
                     )
                     .clicked()
                 {
@@ -5209,8 +5253,8 @@ fn draw_torrent_dialog(app: &mut RajaUi, context: &egui::Context) {
         .min_size([620.0, 420.0])
         .frame(
             egui::Frame::new()
-                .fill(egui::Color32::from_rgb(32, 32, 34))
-                .stroke(egui::Stroke::new(1.0, egui::Color32::from_rgb(70, 70, 75)))
+                .fill(rgb(32, 32, 34))
+                .stroke(egui::Stroke::new(1.0, rgb(70, 70, 75)))
                 .inner_margin(egui::Margin::symmetric(8, 8)),
         )
         .show(context, |ui| {
@@ -5219,7 +5263,7 @@ fn draw_torrent_dialog(app: &mut RajaUi, context: &egui::Context) {
                 ui.label(
                     egui::RichText::new("Torrent / Magnet:")
                         .size(11.5)
-                        .color(egui::Color32::from_rgb(195, 195, 200)),
+                        .color(rgb(195, 195, 200)),
                 );
                 let src_changed = ui
                     .add_sized(
@@ -5252,7 +5296,7 @@ fn draw_torrent_dialog(app: &mut RajaUi, context: &egui::Context) {
                 ui.label(
                     egui::RichText::new("Save As:")
                         .size(11.5)
-                        .color(egui::Color32::from_rgb(195, 195, 200)),
+                        .color(rgb(195, 195, 200)),
                 );
                 ui.add_sized(
                     [ui.available_width() - 36.0, 21.0],
@@ -5286,11 +5330,11 @@ fn draw_torrent_dialog(app: &mut RajaUi, context: &egui::Context) {
                         egui::Button::new(
                             egui::RichText::new("Select All")
                                 .size(12.0)
-                                .color(egui::Color32::from_rgb(235, 235, 240)),
+                                .color(rgb(235, 235, 240)),
                         )
                         .min_size(egui::vec2(78.0, 22.0))
-                        .fill(egui::Color32::from_rgb(48, 48, 52))
-                        .stroke(egui::Stroke::new(1.0, egui::Color32::from_rgb(95, 95, 100))),
+                        .fill(rgb(48, 48, 52))
+                        .stroke(egui::Stroke::new(1.0, rgb(95, 95, 100))),
                     )
                     .clicked()
                 {
@@ -5306,11 +5350,11 @@ fn draw_torrent_dialog(app: &mut RajaUi, context: &egui::Context) {
                         egui::Button::new(
                             egui::RichText::new("Select None")
                                 .size(12.0)
-                                .color(egui::Color32::from_rgb(235, 235, 240)),
+                                .color(rgb(235, 235, 240)),
                         )
                         .min_size(egui::vec2(84.0, 22.0))
-                        .fill(egui::Color32::from_rgb(48, 48, 52))
-                        .stroke(egui::Stroke::new(1.0, egui::Color32::from_rgb(95, 95, 100))),
+                        .fill(rgb(48, 48, 52))
+                        .stroke(egui::Stroke::new(1.0, rgb(95, 95, 100))),
                     )
                     .clicked()
                 {
@@ -5327,14 +5371,14 @@ fn draw_torrent_dialog(app: &mut RajaUi, context: &egui::Context) {
                     ui.painter().rect(
                         search_rect,
                         3.0,
-                        egui::Color32::from_rgb(24, 24, 26),
-                        egui::Stroke::new(1.0, egui::Color32::from_rgb(72, 72, 78)),
+                        rgb(24, 24, 26),
+                        egui::Stroke::new(1.0, rgb(72, 72, 78)),
                         egui::StrokeKind::Inside,
                     );
                     // Magnifying glass icon
                     let lens_c =
                         egui::pos2(search_rect.left() + 11.0, search_rect.center().y - 1.0);
-                    let lens_color = egui::Color32::from_rgb(45, 145, 235);
+                    let lens_color = rgb(45, 145, 235);
                     ui.painter()
                         .circle_stroke(lens_c, 4.2, egui::Stroke::new(1.5, lens_color));
                     ui.painter().line_segment(
@@ -5375,8 +5419,8 @@ fn draw_torrent_dialog(app: &mut RajaUi, context: &egui::Context) {
             ui.painter().rect(
                 header_rect,
                 0.0,
-                egui::Color32::from_rgb(44, 44, 48),
-                egui::Stroke::new(1.0, egui::Color32::from_rgb(72, 72, 78)),
+                rgb(44, 44, 48),
+                egui::Stroke::new(1.0, rgb(72, 72, 78)),
                 egui::StrokeKind::Inside,
             );
             let name_hdr_rect = egui::Rect::from_min_size(
@@ -5396,7 +5440,7 @@ fn draw_torrent_dialog(app: &mut RajaUi, context: &egui::Context) {
                 egui::Align2::LEFT_CENTER,
                 "Name",
                 egui::FontId::proportional(12.0),
-                egui::Color32::from_rgb(230, 230, 235),
+                rgb(230, 230, 235),
             );
             // Sort arrow on right of Name column
             let arrow_x = header_rect.left() + name_w - 10.0;
@@ -5416,7 +5460,7 @@ fn draw_torrent_dialog(app: &mut RajaUi, context: &egui::Context) {
             };
             ui.painter().add(egui::Shape::convex_polygon(
                 tri_pts,
-                egui::Color32::from_rgb(210, 210, 215),
+                rgb(210, 210, 215),
                 egui::Stroke::NONE,
             ));
 
@@ -5428,7 +5472,7 @@ fn draw_torrent_dialog(app: &mut RajaUi, context: &egui::Context) {
                         egui::pos2(sx, header_rect.top() + 2.0),
                         egui::pos2(sx, header_rect.bottom() - 2.0),
                     ],
-                    egui::Stroke::new(1.0, egui::Color32::from_rgb(80, 80, 86)),
+                    egui::Stroke::new(1.0, rgb(80, 80, 86)),
                 );
             }
             ui.painter().text(
@@ -5436,21 +5480,21 @@ fn draw_torrent_dialog(app: &mut RajaUi, context: &egui::Context) {
                 egui::Align2::RIGHT_CENTER,
                 "Total Size",
                 egui::FontId::proportional(12.0),
-                egui::Color32::from_rgb(230, 230, 235),
+                rgb(230, 230, 235),
             );
             ui.painter().text(
                 egui::pos2(x_sep2 + 6.0, header_rect.center().y),
                 egui::Align2::LEFT_CENTER,
                 "Download Priority",
                 egui::FontId::proportional(12.0),
-                egui::Color32::from_rgb(230, 230, 235),
+                rgb(230, 230, 235),
             );
 
             // Tree View Body
             let tree_height = (ui.available_height() - 36.0).max(200.0);
             egui::Frame::new()
-                .fill(egui::Color32::from_rgb(32, 32, 34))
-                .stroke(egui::Stroke::new(1.0, egui::Color32::from_rgb(65, 65, 70)))
+                .fill(rgb(32, 32, 34))
+                .stroke(egui::Stroke::new(1.0, rgb(65, 65, 70)))
                 .show(ui, |ui| {
                     ui.set_min_size(egui::vec2(total_w, tree_height));
                     ui.set_max_size(egui::vec2(total_w, tree_height));
@@ -5479,7 +5523,7 @@ fn draw_torrent_dialog(app: &mut RajaUi, context: &egui::Context) {
                         format_iec_bytes(selected_bytes)
                     ))
                     .size(11.5)
-                    .color(egui::Color32::from_rgb(175, 175, 180)),
+                    .color(rgb(175, 175, 180)),
                 );
 
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
@@ -5488,11 +5532,11 @@ fn draw_torrent_dialog(app: &mut RajaUi, context: &egui::Context) {
                             egui::Button::new(
                                 egui::RichText::new("Cancel")
                                     .size(12.0)
-                                    .color(egui::Color32::from_rgb(235, 235, 240)),
+                                    .color(rgb(235, 235, 240)),
                             )
                             .min_size(egui::vec2(82.0, 24.0))
-                            .fill(egui::Color32::from_rgb(48, 48, 52))
-                            .stroke(egui::Stroke::new(1.0, egui::Color32::from_rgb(95, 95, 100))),
+                            .fill(rgb(48, 48, 52))
+                            .stroke(egui::Stroke::new(1.0, rgb(95, 95, 100))),
                         )
                         .clicked()
                     {
@@ -5505,14 +5549,11 @@ fn draw_torrent_dialog(app: &mut RajaUi, context: &egui::Context) {
                             egui::Button::new(
                                 egui::RichText::new("OK")
                                     .size(12.0)
-                                    .color(egui::Color32::WHITE),
+                                    .color(rgb(255, 255, 255)),
                             )
                             .min_size(egui::vec2(82.0, 24.0))
-                            .fill(egui::Color32::from_rgb(48, 54, 62))
-                            .stroke(egui::Stroke::new(
-                                1.4,
-                                egui::Color32::from_rgb(45, 138, 225),
-                            )),
+                            .fill(rgb(48, 54, 62))
+                            .stroke(egui::Stroke::new(1.4, rgb(45, 138, 225))),
                         )
                         .clicked();
                 });
@@ -5723,11 +5764,11 @@ fn draw_active_download_progress_dialog(
         .title_bar(!compact)
         .frame(
             egui::Frame::new()
-                .fill(egui::Color32::from_rgb(35, 35, 38))
+                .fill(rgb(35, 35, 38))
                 .stroke(if compact {
                     egui::Stroke::NONE
                 } else {
-                    egui::Stroke::new(1.0, egui::Color32::from_rgb(82, 82, 88))
+                    egui::Stroke::new(1.0, rgb(82, 82, 88))
                 })
                 .inner_margin(egui::Margin::symmetric(12, 10)),
         );
@@ -5759,8 +5800,8 @@ fn draw_active_download_progress_dialog(
             ];
             let mut tx = tab_bar_rect.left();
             let mut active_tab_span = (tx, tx + 112.0);
-            let border_col = egui::Color32::from_rgb(185, 185, 190);
-            let box_bg = egui::Color32::from_rgb(45, 45, 48);
+            let border_col = rgb(185, 185, 190);
+            let box_bg = rgb(45, 45, 48);
 
             for (tab_enum, label, w) in tabs {
                 let selected = app.progress_dialog_tab == tab_enum;
@@ -5784,9 +5825,9 @@ fn draw_active_download_progress_dialog(
                 let fill = if selected {
                     box_bg
                 } else if resp.hovered() {
-                    egui::Color32::from_rgb(52, 52, 56)
+                    rgb(52, 52, 56)
                 } else {
-                    egui::Color32::from_rgb(38, 38, 41)
+                    rgb(38, 38, 41)
                 };
                 ui.painter().rect_filled(t_rect, 0.0, fill);
                 // Top, left, right borders of tab
@@ -5807,7 +5848,7 @@ fn draw_active_download_progress_dialog(
                     egui::Align2::CENTER_CENTER,
                     label,
                     egui::FontId::proportional(12.0),
-                    egui::Color32::from_rgb(238, 238, 242),
+                    rgb(238, 238, 242),
                 );
                 if selected {
                     active_tab_span = (t_rect.left(), t_rect.right());
@@ -5903,8 +5944,8 @@ fn draw_active_download_progress_dialog(
                     );
 
                     let font = egui::FontId::proportional(12.5);
-                    let label_color = egui::Color32::from_rgb(214, 214, 220);
-                    let value_color = egui::Color32::from_rgb(242, 242, 246);
+                    let label_color = rgb(214, 214, 220);
+                    let value_color = rgb(242, 242, 246);
                     let painter = box_ui.painter().with_clip_rect(content_rect);
                     let left = content_rect.left();
                     let value_x = left + 104.0;
@@ -5940,7 +5981,7 @@ fn draw_active_download_progress_dialog(
                         let galley = painter.layout(
                             reason.to_owned(),
                             egui::FontId::proportional(12.0),
-                            egui::Color32::from_rgb(255, 150, 140),
+                            rgb(255, 150, 140),
                             content_rect.right() - value_x,
                         );
                         let reason_height = galley.size().y;
@@ -5995,7 +6036,7 @@ fn draw_active_download_progress_dialog(
             let (prog_rect, _) =
                 ui.allocate_exact_size(egui::vec2(536.0, 18.0), egui::Sense::hover());
             ui.painter()
-                .rect_filled(prog_rect, 0.0, egui::Color32::from_rgb(230, 230, 233));
+                .rect_filled(prog_rect, 0.0, fixed_rgb(230, 230, 233));
             let frac = (pct_val as f32 / 100.0).clamp(0.0, 1.0);
             let bar_inner = prog_rect.shrink(2.0);
             if frac > 0.0 {
@@ -6007,12 +6048,12 @@ fn draw_active_download_progress_dialog(
                     ),
                 );
                 ui.painter()
-                    .rect_filled(fill_rect, 0.0, egui::Color32::from_rgb(16, 124, 16));
+                    .rect_filled(fill_rect, 0.0, fixed_rgb(16, 124, 16));
             }
             ui.painter().rect_stroke(
                 prog_rect,
                 0.0,
-                egui::Stroke::new(1.0, egui::Color32::from_rgb(120, 120, 126)),
+                egui::Stroke::new(1.0, rgb(120, 120, 126)),
                 egui::StrokeKind::Inside,
             );
 
@@ -6027,13 +6068,10 @@ fn draw_active_download_progress_dialog(
                     egui::Button::new(
                         egui::RichText::new(label)
                             .size(12.0)
-                            .color(egui::Color32::from_rgb(235, 235, 240)),
+                            .color(rgb(235, 235, 240)),
                     )
-                    .fill(egui::Color32::from_rgb(45, 45, 48))
-                    .stroke(egui::Stroke::new(
-                        1.0,
-                        egui::Color32::from_rgb(135, 135, 140),
-                    )),
+                    .fill(rgb(45, 45, 48))
+                    .stroke(egui::Stroke::new(1.0, rgb(135, 135, 140))),
                 )
                 .clicked()
             };
@@ -6079,7 +6117,7 @@ fn draw_active_download_progress_dialog(
                     ui.label(
                         egui::RichText::new("Start positions and download progress by connections")
                             .size(12.0)
-                            .color(egui::Color32::from_rgb(235, 235, 240)),
+                            .color(rgb(235, 235, 240)),
                     );
                 });
                 ui.add_space(6.0);
@@ -6160,11 +6198,11 @@ fn draw_active_download_progress_dialog(
                 let (strip_rect, _) =
                     ui.allocate_exact_size(egui::vec2(536.0, 16.0), egui::Sense::hover());
                 let sp = ui.painter();
-                sp.rect_filled(strip_rect, 0.0, egui::Color32::from_rgb(235, 237, 244));
+                sp.rect_filled(strip_rect, 0.0, fixed_rgb(235, 237, 244));
                 sp.rect_stroke(
                     strip_rect,
                     0.0,
-                    egui::Stroke::new(1.0, egui::Color32::from_rgb(130, 135, 145)),
+                    egui::Stroke::new(1.0, rgb(130, 135, 145)),
                     egui::StrokeKind::Inside,
                 );
                 let inner_strip = strip_rect.shrink(1.0);
@@ -6181,8 +6219,8 @@ fn draw_active_download_progress_dialog(
                                 egui::pos2(x0, inner_strip.center().y),
                                 egui::pos2(x1, inner_strip.bottom()),
                             );
-                            sp.rect_filled(top_half, 0.0, egui::Color32::from_rgb(68, 158, 248));
-                            sp.rect_filled(bot_half, 0.0, egui::Color32::from_rgb(14, 96, 208));
+                            sp.rect_filled(top_half, 0.0, fixed_rgb(68, 158, 248));
+                            sp.rect_filled(bot_half, 0.0, fixed_rgb(14, 96, 208));
                         }
                         // Red start position marker line
                         sp.line_segment(
@@ -6190,7 +6228,7 @@ fn draw_active_download_progress_dialog(
                                 egui::pos2(x0, inner_strip.top()),
                                 egui::pos2(x0, inner_strip.bottom()),
                             ],
-                            egui::Stroke::new(1.5, egui::Color32::from_rgb(215, 38, 38)),
+                            egui::Stroke::new(1.5, fixed_rgb(215, 38, 38)),
                         );
                     }
                 }
@@ -6203,11 +6241,11 @@ fn draw_active_download_progress_dialog(
                 let (table_rect, _) =
                     ui.allocate_exact_size(egui::vec2(536.0, table_h), egui::Sense::hover());
                 let tp = ui.painter();
-                tp.rect_filled(table_rect, 0.0, egui::Color32::from_rgb(45, 45, 48));
+                tp.rect_filled(table_rect, 0.0, rgb(45, 45, 48));
                 tp.rect_stroke(
                     table_rect,
                     0.0,
-                    egui::Stroke::new(1.0, egui::Color32::from_rgb(135, 135, 140)),
+                    egui::Stroke::new(1.0, rgb(135, 135, 140)),
                     egui::StrokeKind::Inside,
                 );
 
@@ -6218,24 +6256,20 @@ fn draw_active_download_progress_dialog(
                     table_rect.min,
                     egui::pos2(table_rect.right(), table_rect.top() + hdr_h),
                 );
-                tp.rect_filled(
-                    hdr_rect.shrink(1.0),
-                    0.0,
-                    egui::Color32::from_rgb(42, 42, 45),
-                );
+                tp.rect_filled(hdr_rect.shrink(1.0), 0.0, rgb(42, 42, 45));
                 tp.text(
                     egui::pos2(hdr_rect.left() + 8.0, hdr_rect.center().y),
                     egui::Align2::LEFT_CENTER,
                     "N.",
                     egui::FontId::proportional(12.0),
-                    egui::Color32::from_rgb(238, 238, 242),
+                    rgb(238, 238, 242),
                 );
                 tp.text(
                     egui::pos2(hdr_rect.left() + col_n_w + 8.0, hdr_rect.center().y),
                     egui::Align2::LEFT_CENTER,
                     "Downloaded",
                     egui::FontId::proportional(12.0),
-                    egui::Color32::from_rgb(238, 238, 242),
+                    rgb(238, 238, 242),
                 );
                 tp.text(
                     egui::pos2(
@@ -6245,14 +6279,14 @@ fn draw_active_download_progress_dialog(
                     egui::Align2::LEFT_CENTER,
                     "Info",
                     egui::FontId::proportional(12.0),
-                    egui::Color32::from_rgb(238, 238, 242),
+                    rgb(238, 238, 242),
                 );
                 tp.line_segment(
                     [
                         egui::pos2(hdr_rect.left(), hdr_rect.bottom()),
                         egui::pos2(hdr_rect.right(), hdr_rect.bottom()),
                     ],
-                    egui::Stroke::new(1.5, egui::Color32::from_rgb(20, 20, 22)),
+                    egui::Stroke::new(1.5, rgb(20, 20, 22)),
                 );
 
                 // Vertical column lines across entire table
@@ -6266,7 +6300,7 @@ fn draw_active_download_progress_dialog(
                             egui::pos2(vx, table_rect.top() + 1.0),
                             egui::pos2(vx, table_rect.bottom() - 1.0),
                         ],
-                        egui::Stroke::new(1.0, egui::Color32::from_rgb(115, 115, 120)),
+                        egui::Stroke::new(1.0, rgb(115, 115, 120)),
                     );
                 }
 
@@ -6295,7 +6329,7 @@ fn draw_active_download_progress_dialog(
                                 egui::Align2::CENTER_CENTER,
                                 format!("{}", idx + 1),
                                 egui::FontId::proportional(12.0),
-                                egui::Color32::from_rgb(235, 235, 240),
+                                rgb(235, 235, 240),
                             );
                             if dl > 0 || !info.is_empty() {
                                 rp.text(
@@ -6303,7 +6337,7 @@ fn draw_active_download_progress_dialog(
                                     egui::Align2::LEFT_CENTER,
                                     format_size_3dec(dl),
                                     egui::FontId::proportional(12.0),
-                                    egui::Color32::from_rgb(235, 235, 240),
+                                    rgb(235, 235, 240),
                                 );
                             }
                             if !info.is_empty() {
@@ -6315,7 +6349,7 @@ fn draw_active_download_progress_dialog(
                                     egui::Align2::LEFT_CENTER,
                                     info,
                                     egui::FontId::proportional(12.0),
-                                    egui::Color32::from_rgb(235, 235, 240),
+                                    rgb(235, 235, 240),
                                 );
                             }
                         }
@@ -6370,8 +6404,8 @@ fn draw_forget_download_dialog(app: &mut RajaUi, context: &egui::Context) {
         .default_width(470.0)
         .frame(
             egui::Frame::new()
-                .fill(egui::Color32::from_rgb(35, 35, 38))
-                .stroke(egui::Stroke::new(1.0, egui::Color32::from_rgb(82, 82, 88)))
+                .fill(rgb(35, 35, 38))
+                .stroke(egui::Stroke::new(1.0, rgb(82, 82, 88)))
                 .inner_margin(egui::Margin::symmetric(18, 14)),
         )
         .show(context, |ui| {
@@ -6380,7 +6414,7 @@ fn draw_forget_download_dialog(app: &mut RajaUi, context: &egui::Context) {
                     "Are you sure you want to delete the selected downloads from the Raja download list?",
                 )
                 .size(12.5)
-                .color(egui::Color32::from_rgb(235, 235, 240)),
+                .color(rgb(235, 235, 240)),
             );
             ui.add_space(12.0);
             ui.horizontal(|ui| {
@@ -6391,7 +6425,7 @@ fn draw_forget_download_dialog(app: &mut RajaUi, context: &egui::Context) {
                         "Delete completely downloaded files from your hard disk as well. Be careful !",
                     )
                     .size(12.2)
-                    .color(egui::Color32::from_rgb(232, 232, 236)),
+                    .color(rgb(232, 232, 236)),
                 );
             });
             ui.add_space(4.0);
@@ -6401,7 +6435,7 @@ fn draw_forget_download_dialog(app: &mut RajaUi, context: &egui::Context) {
                     &mut app.dont_show_delete_confirm_again,
                     egui::RichText::new("Don't show this dialog again")
                         .size(12.2)
-                        .color(egui::Color32::from_rgb(232, 232, 236)),
+                        .color(rgb(232, 232, 236)),
                 );
             });
             ui.add_space(14.0);
@@ -6412,13 +6446,13 @@ fn draw_forget_download_dialog(app: &mut RajaUi, context: &egui::Context) {
                         egui::Button::new(
                             egui::RichText::new("Yes")
                                 .size(12.5)
-                                .color(egui::Color32::WHITE),
+                                .color(rgb(255, 255, 255)),
                         )
                         .min_size(egui::vec2(86.0, 25.0))
-                        .fill(egui::Color32::from_rgb(45, 45, 48))
+                        .fill(rgb(45, 45, 48))
                         .stroke(egui::Stroke::new(
                             1.5,
-                            egui::Color32::from_rgb(45, 138, 225),
+                            rgb(45, 138, 225),
                         )),
                     )
                     .clicked();
@@ -6428,13 +6462,13 @@ fn draw_forget_download_dialog(app: &mut RajaUi, context: &egui::Context) {
                         egui::Button::new(
                             egui::RichText::new("No")
                                 .size(12.5)
-                                .color(egui::Color32::from_rgb(235, 235, 240)),
+                                .color(rgb(235, 235, 240)),
                         )
                         .min_size(egui::vec2(86.0, 25.0))
-                        .fill(egui::Color32::from_rgb(43, 43, 46))
+                        .fill(rgb(43, 43, 46))
                         .stroke(egui::Stroke::new(
                             1.0,
-                            egui::Color32::from_rgb(135, 135, 140),
+                            rgb(135, 135, 140),
                         )),
                     )
                     .clicked();
@@ -6592,37 +6626,37 @@ fn paint_properties_header_icon(
     if cat == AddFileCategory::Programs {
         // Classic Windows Application (.exe) window icon matching screenshot
         let box_rect = egui::Rect::from_center_size(rect.center(), egui::vec2(34.0, 26.0));
-        painter.rect_filled(box_rect, 0.0, egui::Color32::from_rgb(245, 245, 247));
+        painter.rect_filled(box_rect, 0.0, rgb(245, 245, 247));
         painter.rect_stroke(
             box_rect,
             0.0,
-            egui::Stroke::new(1.0, egui::Color32::from_rgb(108, 108, 114)),
+            egui::Stroke::new(1.0, rgb(108, 108, 114)),
             egui::StrokeKind::Inside,
         );
         let title_bar = egui::Rect::from_min_max(
             egui::pos2(box_rect.left() + 1.0, box_rect.top() + 1.0),
             egui::pos2(box_rect.right() - 1.0, box_rect.top() + 5.0),
         );
-        painter.rect_filled(title_bar, 0.0, egui::Color32::from_rgb(205, 208, 214));
+        painter.rect_filled(title_bar, 0.0, rgb(205, 208, 214));
         painter.line_segment(
             [
                 egui::pos2(box_rect.left() + 1.0, box_rect.top() + 5.0),
                 egui::pos2(box_rect.right() - 1.0, box_rect.top() + 5.0),
             ],
-            egui::Stroke::new(1.0, egui::Color32::from_rgb(130, 130, 136)),
+            egui::Stroke::new(1.0, rgb(130, 130, 136)),
         );
         let blue_pane = egui::Rect::from_min_max(
             egui::pos2(box_rect.left() + 6.0, box_rect.top() + 7.0),
             egui::pos2(box_rect.left() + 18.0, box_rect.bottom() - 3.0),
         );
-        painter.rect_filled(blue_pane, 0.0, egui::Color32::from_rgb(0, 112, 218));
+        painter.rect_filled(blue_pane, 0.0, fixed_rgb(0, 112, 218));
         for dy in [8.5, 12.0, 15.5, 19.0] {
             painter.line_segment(
                 [
                     egui::pos2(box_rect.left() + 21.0, box_rect.top() + dy),
                     egui::pos2(box_rect.right() - 4.0, box_rect.top() + dy),
                 ],
-                egui::Stroke::new(1.0, egui::Color32::from_rgb(125, 128, 135)),
+                egui::Stroke::new(1.0, rgb(125, 128, 135)),
             );
         }
         for dy in [9.0, 13.0, 17.0] {
@@ -6631,7 +6665,7 @@ fn paint_properties_header_icon(
                     egui::pos2(box_rect.left() + 2.0, box_rect.top() + dy),
                     egui::pos2(box_rect.left() + 4.5, box_rect.top() + dy),
                 ],
-                egui::Stroke::new(1.0, egui::Color32::from_rgb(135, 138, 145)),
+                egui::Stroke::new(1.0, rgb(135, 138, 145)),
             );
         }
     } else {
@@ -6645,7 +6679,7 @@ fn draw_etched_separator(ui: &mut egui::Ui) {
     let y = rect.center().y;
     ui.painter().line_segment(
         [egui::pos2(rect.left(), y), egui::pos2(rect.right(), y)],
-        egui::Stroke::new(1.0, egui::Color32::from_rgb(90, 90, 96)),
+        egui::Stroke::new(1.0, rgb(90, 90, 96)),
     );
 }
 
@@ -6675,25 +6709,22 @@ fn draw_properties_dialog(app: &mut RajaUi, context: &egui::Context) {
         .default_width(516.0)
         .frame(
             egui::Frame::new()
-                .fill(egui::Color32::from_rgb(35, 35, 38))
-                .stroke(egui::Stroke::new(1.0, egui::Color32::from_rgb(82, 82, 88)))
+                .fill(rgb(35, 35, 38))
+                .stroke(egui::Stroke::new(1.0, rgb(82, 82, 88)))
                 .inner_margin(egui::Margin::symmetric(12, 10)),
         )
         .show(context, |ui| {
             let mut field_visuals = ui.visuals().clone();
-            field_visuals.extreme_bg_color = egui::Color32::from_rgb(43, 43, 46);
-            field_visuals.widgets.inactive.bg_fill = egui::Color32::from_rgb(43, 43, 46);
-            field_visuals.widgets.inactive.bg_stroke =
-                egui::Stroke::new(1.0, egui::Color32::from_rgb(135, 135, 140));
-            field_visuals.widgets.hovered.bg_fill = egui::Color32::from_rgb(48, 48, 52);
-            field_visuals.widgets.hovered.bg_stroke =
-                egui::Stroke::new(1.2, egui::Color32::from_rgb(200, 200, 205));
-            field_visuals.widgets.active.bg_fill = egui::Color32::from_rgb(43, 43, 46);
-            field_visuals.widgets.active.bg_stroke =
-                egui::Stroke::new(1.4, egui::Color32::from_rgb(45, 138, 225));
+            field_visuals.extreme_bg_color = rgb(43, 43, 46);
+            field_visuals.widgets.inactive.bg_fill = rgb(43, 43, 46);
+            field_visuals.widgets.inactive.bg_stroke = egui::Stroke::new(1.0, rgb(135, 135, 140));
+            field_visuals.widgets.hovered.bg_fill = rgb(48, 48, 52);
+            field_visuals.widgets.hovered.bg_stroke = egui::Stroke::new(1.2, rgb(200, 200, 205));
+            field_visuals.widgets.active.bg_fill = rgb(43, 43, 46);
+            field_visuals.widgets.active.bg_stroke = egui::Stroke::new(1.4, rgb(45, 138, 225));
             ui.set_visuals(field_visuals);
 
-            let text_col = egui::Color32::from_rgb(235, 235, 240);
+            let text_col = rgb(235, 235, 240);
             ui.set_width(508.0);
             ui.spacing_mut().item_spacing = egui::vec2(6.0, 6.0);
             let label_col_w = 88.0;
@@ -6788,11 +6819,8 @@ fn draw_properties_dialog(app: &mut RajaUi, context: &egui::Context) {
                         download.status != "active",
                         egui::Button::new(egui::RichText::new("Move").size(12.0).color(text_col))
                             .min_size(egui::vec2(82.0, 23.0))
-                            .fill(egui::Color32::from_rgb(45, 45, 48))
-                            .stroke(egui::Stroke::new(
-                                1.0,
-                                egui::Color32::from_rgb(135, 135, 140),
-                            )),
+                            .fill(rgb(45, 45, 48))
+                            .stroke(egui::Stroke::new(1.0, rgb(135, 135, 140))),
                     )
                     .clicked()
                 {
@@ -6850,7 +6878,7 @@ fn draw_properties_dialog(app: &mut RajaUi, context: &egui::Context) {
             ui.label(
                 egui::RichText::new(web_page_str)
                     .size(12.5)
-                    .color(egui::Color32::from_rgb(205, 205, 212)),
+                    .color(rgb(205, 205, 212)),
             );
 
             draw_etched_separator(ui);
@@ -6908,13 +6936,10 @@ fn draw_properties_dialog(app: &mut RajaUi, context: &egui::Context) {
                     let ok_btn = egui::Button::new(
                         egui::RichText::new("OK")
                             .size(12.5)
-                            .color(egui::Color32::WHITE),
+                            .color(rgb(255, 255, 255)),
                     )
-                    .fill(egui::Color32::from_rgb(45, 45, 48))
-                    .stroke(egui::Stroke::new(
-                        1.5,
-                        egui::Color32::from_rgb(45, 138, 225),
-                    ))
+                    .fill(rgb(45, 45, 48))
+                    .stroke(egui::Stroke::new(1.5, rgb(45, 138, 225)))
                     .min_size(egui::vec2(82.0, 25.0));
                     if ui.add(ok_btn).clicked() {
                         trigger_ok = true;
@@ -6922,11 +6947,8 @@ fn draw_properties_dialog(app: &mut RajaUi, context: &egui::Context) {
                     ui.add_space(68.0);
                     let open_btn =
                         egui::Button::new(egui::RichText::new("Open").size(12.5).color(text_col))
-                            .fill(egui::Color32::from_rgb(43, 43, 46))
-                            .stroke(egui::Stroke::new(
-                                1.0,
-                                egui::Color32::from_rgb(135, 135, 140),
-                            ))
+                            .fill(rgb(43, 43, 46))
+                            .stroke(egui::Stroke::new(1.0, rgb(135, 135, 140)))
                             .min_size(egui::vec2(82.0, 25.0));
                     if ui.add(open_btn).clicked() {
                         trigger_open = true;
@@ -7734,7 +7756,7 @@ fn draw_update_dialog(app: &mut RajaUi, context: &egui::Context) {
                     }
                     if running > 0 {
                         ui.colored_label(
-                            egui::Color32::from_rgb(255, 190, 120),
+                            rgb(255, 190, 120),
                             format!(
                                 "{running} download(s) running. They stop when Raja closes \
                                  for the update and can be resumed afterwards."
@@ -7786,7 +7808,7 @@ fn draw_update_dialog(app: &mut RajaUi, context: &egui::Context) {
                     });
                 }
                 UpdateState::Failed(error) => {
-                    ui.colored_label(egui::Color32::from_rgb(255, 150, 140), error);
+                    ui.colored_label(rgb(255, 150, 140), error);
                     ui.horizontal(|ui| {
                         if ui.button("Try again").clicked() {
                             action = Some("retry");
@@ -7895,8 +7917,8 @@ fn paint_file_info_large_icon(
             ];
             painter.add(egui::Shape::convex_polygon(
                 base_pts.clone(),
-                egui::Color32::from_rgb(232, 112, 12),
-                egui::Stroke::new(1.0, egui::Color32::from_rgb(165, 68, 4)),
+                rgb(232, 112, 12),
+                egui::Stroke::new(1.0, rgb(165, 68, 4)),
             ));
             // Base front highlight
             painter.line_segment(
@@ -7904,7 +7926,7 @@ fn paint_file_info_large_icon(
                     egui::pos2(center.x - 20.0, center.y + 18.0),
                     egui::pos2(center.x + 20.0, center.y + 18.0),
                 ],
-                egui::Stroke::new(2.0, egui::Color32::from_rgb(252, 152, 38)),
+                egui::Stroke::new(2.0, rgb(252, 152, 38)),
             );
 
             // Cone body (orange trapezoid)
@@ -7916,8 +7938,8 @@ fn paint_file_info_large_icon(
             ];
             painter.add(egui::Shape::convex_polygon(
                 cone_pts,
-                egui::Color32::from_rgb(248, 128, 18),
-                egui::Stroke::new(1.0, egui::Color32::from_rgb(192, 82, 8)),
+                rgb(248, 128, 18),
+                egui::Stroke::new(1.0, rgb(192, 82, 8)),
             ));
 
             // Upper white reflective stripe
@@ -7929,7 +7951,7 @@ fn paint_file_info_large_icon(
             ];
             painter.add(egui::Shape::convex_polygon(
                 stripe1,
-                egui::Color32::from_rgb(246, 246, 248),
+                rgb(246, 246, 248),
                 egui::Stroke::NONE,
             ));
 
@@ -7942,7 +7964,7 @@ fn paint_file_info_large_icon(
             ];
             painter.add(egui::Shape::convex_polygon(
                 stripe2,
-                egui::Color32::from_rgb(242, 242, 246),
+                rgb(242, 242, 246),
                 egui::Stroke::NONE,
             ));
 
@@ -7959,11 +7981,7 @@ fn paint_file_info_large_icon(
             );
         }
         AddFileCategory::Compressed => {
-            let colors = [
-                egui::Color32::from_rgb(198, 92, 198),
-                egui::Color32::from_rgb(56, 138, 228),
-                egui::Color32::from_rgb(68, 178, 86),
-            ];
+            let colors = [rgb(198, 92, 198), rgb(56, 138, 228), rgb(68, 178, 86)];
             for (idx, col) in colors.iter().enumerate() {
                 let y = center.y - 14.0 + (idx as f32) * 10.0;
                 let r =
@@ -7973,11 +7991,11 @@ fn paint_file_info_large_icon(
             painter.rect_filled(
                 egui::Rect::from_center_size(center, egui::vec2(6.0, 32.0)),
                 1.0,
-                egui::Color32::from_rgb(228, 182, 68),
+                rgb(228, 182, 68),
             );
         }
         AddFileCategory::Music => {
-            let col = egui::Color32::from_rgb(82, 168, 248);
+            let col = rgb(82, 168, 248);
             painter.circle_filled(egui::pos2(center.x - 7.0, center.y + 10.0), 6.5, col);
             painter.circle_filled(egui::pos2(center.x + 9.0, center.y + 7.0), 6.5, col);
             let s = egui::Stroke::new(3.2, col);
@@ -8005,20 +8023,20 @@ fn paint_file_info_large_icon(
         }
         AddFileCategory::Programs => {
             let win = egui::Rect::from_center_size(center, egui::vec2(36.0, 30.0));
-            painter.rect_filled(win, 3.0, egui::Color32::from_rgb(45, 138, 218));
+            painter.rect_filled(win, 3.0, rgb(45, 138, 218));
             let inner = egui::Rect::from_min_max(
                 egui::pos2(win.left() + 3.0, win.top() + 8.0),
                 egui::pos2(win.right() - 3.0, win.bottom() - 3.0),
             );
-            painter.rect_filled(inner, 1.5, egui::Color32::from_rgb(225, 236, 248));
+            painter.rect_filled(inner, 1.5, rgb(225, 236, 248));
         }
         _ => {
             let doc = egui::Rect::from_center_size(center, egui::vec2(28.0, 36.0));
-            painter.rect_filled(doc, 2.0, egui::Color32::from_rgb(235, 238, 244));
+            painter.rect_filled(doc, 2.0, rgb(235, 238, 244));
             painter.rect_stroke(
                 doc,
                 2.0,
-                egui::Stroke::new(1.2, egui::Color32::from_rgb(150, 155, 165)),
+                egui::Stroke::new(1.2, rgb(150, 155, 165)),
                 egui::StrokeKind::Inside,
             );
         }
@@ -8330,8 +8348,7 @@ fn draw_single_torrent_tree_row(
     let (row_rect, row_resp) =
         ui.allocate_exact_size(egui::vec2(total_w, row_h), egui::Sense::hover());
     if row_resp.hovered() {
-        ui.painter()
-            .rect_filled(row_rect, 0.0, egui::Color32::from_rgb(42, 44, 50));
+        ui.painter().rect_filled(row_rect, 0.0, rgb(42, 44, 50));
     }
 
     let indent = row_rect.left() + 6.0 + (depth as f32) * 18.0;
@@ -8349,9 +8366,9 @@ fn draw_single_torrent_tree_row(
             egui::Sense::click(),
         );
         let tri_col = if tri_resp.hovered() {
-            egui::Color32::WHITE
+            rgb(255, 255, 255)
         } else {
-            egui::Color32::from_rgb(190, 190, 195)
+            rgb(190, 190, 195)
         };
         let cx = tri_rect.center().x;
         let cy = tri_rect.center().y;
@@ -8390,7 +8407,7 @@ fn draw_single_torrent_tree_row(
         egui::Sense::click(),
     );
     if is_selected {
-        let s = egui::Stroke::new(1.6, egui::Color32::from_rgb(225, 225, 230));
+        let s = egui::Stroke::new(1.6, rgb(225, 225, 230));
         let cx = check_rect.center().x;
         let cy = check_rect.center().y;
         ui.painter().line_segment(
@@ -8411,7 +8428,7 @@ fn draw_single_torrent_tree_row(
         ui.painter().rect_stroke(
             check_rect.shrink(1.5),
             1.5,
-            egui::Stroke::new(1.1, egui::Color32::from_rgb(130, 130, 138)),
+            egui::Stroke::new(1.1, rgb(130, 130, 138)),
             egui::StrokeKind::Inside,
         );
     }
@@ -8444,9 +8461,9 @@ fn draw_single_torrent_tree_row(
         action = TorrentRowAction::ToggleSelect;
     }
     let text_color = if is_selected {
-        egui::Color32::from_rgb(235, 235, 240)
+        rgb(235, 235, 240)
     } else {
-        egui::Color32::from_rgb(145, 145, 152)
+        rgb(145, 145, 152)
     };
     ui.painter().with_clip_rect(name_rect).text(
         egui::pos2(text_x, row_rect.center().y),
@@ -8508,12 +8525,12 @@ fn paint_torrent_file_icon(painter: &egui::Painter, rect: egui::Rect, is_folder:
             egui::pos2(c.x - 6.5, c.y - 3.5),
             egui::pos2(c.x + 6.5, c.y + 5.0),
         );
-        painter.rect_filled(tab, 1.0, egui::Color32::from_rgb(232, 182, 58));
-        painter.rect_filled(body, 1.2, egui::Color32::from_rgb(245, 202, 78));
+        painter.rect_filled(tab, 1.0, rgb(232, 182, 58));
+        painter.rect_filled(body, 1.2, rgb(245, 202, 78));
         painter.rect_stroke(
             body,
             1.2,
-            egui::Stroke::new(0.8, egui::Color32::from_rgb(185, 138, 32)),
+            egui::Stroke::new(0.8, rgb(185, 138, 32)),
             egui::StrokeKind::Inside,
         );
         return;
@@ -8529,37 +8546,33 @@ fn paint_torrent_file_icon(painter: &egui::Painter, rect: egui::Rect, is_folder:
             egui::pos2(c.x - 6.0, c.y - 5.0),
             egui::pos2(c.x + 6.0, c.y + 5.0),
         );
-        painter.rect_filled(win, 1.2, egui::Color32::from_rgb(65, 148, 225));
+        painter.rect_filled(win, 1.2, rgb(65, 148, 225));
         let inner = egui::Rect::from_min_max(
             egui::pos2(c.x - 4.5, c.y - 2.2),
             egui::pos2(c.x + 4.5, c.y + 3.8),
         );
-        painter.rect_filled(inner, 0.5, egui::Color32::from_rgb(225, 236, 248));
+        painter.rect_filled(inner, 0.5, rgb(225, 236, 248));
     } else if matches!(ext.as_str(), "bat" | "cmd" | "ps1" | "sh") {
         // Script / batch icon with gear (like Verify BIN files before installation.bat)
         let doc = egui::Rect::from_min_max(
             egui::pos2(c.x - 6.0, c.y - 5.0),
             egui::pos2(c.x + 6.0, c.y + 5.0),
         );
-        painter.rect_filled(doc, 1.2, egui::Color32::from_rgb(218, 222, 228));
-        painter.circle_stroke(
-            c,
-            2.5,
-            egui::Stroke::new(1.5, egui::Color32::from_rgb(90, 102, 118)),
-        );
+        painter.rect_filled(doc, 1.2, rgb(218, 222, 228));
+        painter.circle_stroke(c, 2.5, egui::Stroke::new(1.5, rgb(90, 102, 118)));
     } else {
         // Clean white document page icon with folded top-right corner (like fg-01.bin)
         let doc = egui::Rect::from_min_max(
             egui::pos2(c.x - 4.8, c.y - 6.0),
             egui::pos2(c.x + 4.8, c.y + 6.0),
         );
-        painter.rect_filled(doc, 1.0, egui::Color32::from_rgb(232, 235, 240));
+        painter.rect_filled(doc, 1.0, rgb(232, 235, 240));
         painter.line_segment(
             [
                 egui::pos2(doc.right() - 3.0, doc.top()),
                 egui::pos2(doc.right(), doc.top() + 3.0),
             ],
-            egui::Stroke::new(1.0, egui::Color32::from_rgb(155, 160, 170)),
+            egui::Stroke::new(1.0, rgb(155, 160, 170)),
         );
     }
 }

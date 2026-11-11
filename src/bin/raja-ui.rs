@@ -162,7 +162,7 @@ struct RajaUi {
     /// compact dialog-only window instead of the whole main window.
     main_visible: std::sync::Arc<std::sync::atomic::AtomicBool>,
     /// When set, the root window is temporarily shrunk to show only a single
-    /// dialog (IDM-style "Download File Info" / progress window).
+    /// dialog (compact "Download File Info" / progress window).
     compact_view: Option<CompactView>,
     compact_saved_size: Option<egui::Vec2>,
     compact_title: String,
@@ -1391,7 +1391,7 @@ impl RajaUi {
             });
             self.show_add_dialog = true;
             if self.compact_view.is_some() || !self.is_main_visible() {
-                // IDM-style: show only the "Download File Info" box, not the main window.
+                // Compact mode: show only the "Download File Info" box, not the main window.
                 self.enter_compact(context, CompactView::AddDownload);
             } else {
                 context.send_viewport_cmd(egui::ViewportCommand::Visible(true));
@@ -2629,46 +2629,40 @@ fn draw_toolbar(app: &mut RajaUi, ui: &mut egui::Ui) {
             ui.set_min_width(ui.available_width());
             ui.spacing_mut().item_spacing = egui::vec2(2.0, 0.0);
             ui.horizontal(|ui| {
-                if draw_idm_toolbar_button(ui, ToolbarIcon::AddUrl, "Add URL", true, false)
+                if draw_toolbar_button(ui, ToolbarIcon::AddUrl, "Add URL", true, false)
                     .on_hover_text("Add a new download URL")
                     .clicked()
                 {
                     app.show_add_dialog = true;
                 }
-                if draw_idm_toolbar_button(ui, ToolbarIcon::Resume, "Resume", can_retry, false)
+                if draw_toolbar_button(ui, ToolbarIcon::Resume, "Resume", can_retry, false)
                     .on_hover_text("Resume selected unfinished download")
                     .clicked()
                     && let Some(id) = app.selected_download
                 {
                     app.resume_download(id);
                 }
-                if draw_idm_toolbar_button(ui, ToolbarIcon::Stop, "Stop", can_pause, false)
+                if draw_toolbar_button(ui, ToolbarIcon::Stop, "Stop", can_pause, false)
                     .on_hover_text("Stop selected active download")
                     .clicked()
                     && let Some(id) = app.selected_download
                 {
                     app.pause_download(id);
                 }
-                if draw_idm_toolbar_button(
-                    ui,
-                    ToolbarIcon::StopAll,
-                    "Stop All",
-                    can_pause_all,
-                    false,
-                )
-                .on_hover_text("Stop all active downloads")
-                .clicked()
+                if draw_toolbar_button(ui, ToolbarIcon::StopAll, "Stop All", can_pause_all, false)
+                    .on_hover_text("Stop all active downloads")
+                    .clicked()
                 {
                     app.pause_all();
                 }
-                if draw_idm_toolbar_button(ui, ToolbarIcon::Delete, "Delete", can_forget, false)
+                if draw_toolbar_button(ui, ToolbarIcon::Delete, "Delete", can_forget, false)
                     .on_hover_text("Remove selected download")
                     .clicked()
                     && let Some(id) = app.selected_download
                 {
                     app.request_remove_download(id);
                 }
-                if draw_idm_toolbar_button(
+                if draw_toolbar_button(
                     ui,
                     ToolbarIcon::DeleteCompleted,
                     "Delete C...",
@@ -2680,7 +2674,7 @@ fn draw_toolbar(app: &mut RajaUi, ui: &mut egui::Ui) {
                 {
                     app.show_delete_completed_dialog = true;
                 }
-                if draw_idm_toolbar_button(ui, ToolbarIcon::Options, "Options", true, false)
+                if draw_toolbar_button(ui, ToolbarIcon::Options, "Options", true, false)
                     .on_hover_text("Configure default download directory and options")
                     .clicked()
                 {
@@ -2698,13 +2692,13 @@ fn draw_toolbar(app: &mut RajaUi, ui: &mut egui::Ui) {
                         )
                     },
                 );
-                if draw_idm_toolbar_button(ui, ToolbarIcon::Scheduler, "Scheduler", true, false)
+                if draw_toolbar_button(ui, ToolbarIcon::Scheduler, "Scheduler", true, false)
                     .on_hover_text(scheduler_tooltip)
                     .clicked()
                 {
                     app.show_scheduler_dialog = true;
                 }
-                if draw_idm_toolbar_button(
+                if draw_toolbar_button(
                     ui,
                     ToolbarIcon::StartQueue,
                     "Start Qu...",
@@ -2716,7 +2710,7 @@ fn draw_toolbar(app: &mut RajaUi, ui: &mut egui::Ui) {
                 {
                     app.start_queue();
                 }
-                if draw_idm_toolbar_button(
+                if draw_toolbar_button(
                     ui,
                     ToolbarIcon::StopQueue,
                     "Stop Qu...",
@@ -2728,19 +2722,13 @@ fn draw_toolbar(app: &mut RajaUi, ui: &mut egui::Ui) {
                 {
                     app.stop_queue();
                 }
-                if draw_idm_toolbar_button(
-                    ui,
-                    ToolbarIcon::TellFriend,
-                    "Tell a Frie...",
-                    true,
-                    false,
-                )
-                .on_hover_text("About RAJA / Share with a friend")
-                .clicked()
+                if draw_toolbar_button(ui, ToolbarIcon::TellFriend, "Tell a Frie...", true, false)
+                    .on_hover_text("About RAJA / Share with a friend")
+                    .clicked()
                 {
                     app.show_tell_friend_dialog = true;
                 }
-                if draw_idm_toolbar_button(ui, ToolbarIcon::Torrent, "Torrent", true, false)
+                if draw_toolbar_button(ui, ToolbarIcon::Torrent, "Torrent", true, false)
                     .on_hover_text("Download via BitTorrent (.torrent file or Magnet link)")
                     .clicked()
                 {
@@ -2750,7 +2738,7 @@ fn draw_toolbar(app: &mut RajaUi, ui: &mut egui::Ui) {
         });
 }
 
-fn draw_idm_toolbar_button(
+fn draw_toolbar_button(
     ui: &mut egui::Ui,
     icon: ToolbarIcon,
     label: &str,
@@ -4370,7 +4358,7 @@ fn draw_add_download_dialog(app: &mut RajaUi, context: &egui::Context) -> Option
     let window = if compact {
         window.anchor(egui::Align2::LEFT_TOP, egui::Vec2::ZERO)
     } else {
-        // Open centred over the main window, like IDM's progress dialog.
+        // Open centred over the main window.
         window
             .pivot(egui::Align2::CENTER_CENTER)
             .default_pos(context.content_rect().center())
@@ -4456,7 +4444,7 @@ fn draw_add_download_dialog(app: &mut RajaUi, context: &egui::Context) -> Option
                             },
                         );
                         let prev_cat = app.add_dialog_category;
-                        egui::ComboBox::from_id_salt("idm-add-category")
+                        egui::ComboBox::from_id_salt("add-download-category")
                             .width(210.0)
                             .selected_text(app.add_dialog_category.label())
                             .show_ui(ui, |ui| {
@@ -5169,7 +5157,7 @@ fn draw_torrent_dialog(app: &mut RajaUi, context: &egui::Context) {
     }
 }
 
-fn format_idm_size_3dec(bytes: u64) -> String {
+fn format_size_3dec(bytes: u64) -> String {
     const KB: f64 = 1024.0;
     const MB: f64 = 1024.0 * 1024.0;
     const GB: f64 = 1024.0 * 1024.0 * 1024.0;
@@ -5185,7 +5173,7 @@ fn format_idm_size_3dec(bytes: u64) -> String {
     }
 }
 
-fn format_idm_rate_3dec(bytes_per_sec: Option<f64>) -> String {
+fn format_rate_3dec(bytes_per_sec: Option<f64>) -> String {
     let Some(bps) = bytes_per_sec.filter(|&r| r > 0.0) else {
         return "0.000 KB/sec".to_owned();
     };
@@ -5200,7 +5188,7 @@ fn format_idm_rate_3dec(bytes_per_sec: Option<f64>) -> String {
     }
 }
 
-fn format_idm_time_left(
+fn format_time_left(
     total_size: Option<u64>,
     durable_bytes: u64,
     rate: Option<f64>,
@@ -5291,7 +5279,7 @@ fn draw_active_download_progress_dialog(
     let mut open_completed = false;
 
     #[allow(deprecated)]
-    let win_id = egui::Id::new("idm-active-download-progress-window");
+    let win_id = egui::Id::new("active-download-progress-window");
     let compact = app.compact_view.is_some();
     if compact {
         app.set_compact_title(context, window_title.clone());
@@ -5316,7 +5304,7 @@ fn draw_active_download_progress_dialog(
     let window = if compact {
         window.anchor(egui::Align2::LEFT_TOP, egui::Vec2::ZERO)
     } else {
-        // Open centred over the main window, like IDM's progress dialog.
+        // Open centred over the main window.
         window
             .pivot(egui::Align2::CENTER_CENTER)
             .default_pos(context.content_rect().center())
@@ -5357,7 +5345,7 @@ fn draw_active_download_progress_dialog(
                 );
                 let resp = ui.interact(
                     t_rect,
-                    ui.make_persistent_id(("idm-prog-tab", label)),
+                    ui.make_persistent_id(("progress-dialog-tab", label)),
                     egui::Sense::click(),
                 );
                 if resp.clicked() {
@@ -5441,7 +5429,7 @@ fn draw_active_download_progress_dialog(
 
             match app.progress_dialog_tab {
                 ProgressDialogTab::DownloadStatus => {
-                    // IDM grid: labels at a fixed left column, values at a fixed
+                    // Fixed grid: labels at a fixed left column, values at a fixed
                     // value column, every row on a fixed 18 px pitch.
                     let status_msg = if is_complete {
                         "Download complete"
@@ -5460,18 +5448,18 @@ fn draw_active_download_progress_dialog(
                     };
                     let size_str = download
                         .total_size
-                        .map_or_else(|| "Unknown".to_owned(), format_idm_size_3dec);
+                        .map_or_else(|| "Unknown".to_owned(), format_size_3dec);
                     let dl_str = if download.total_size.is_some() || is_complete {
                         format!(
                             "{}  ( {:.2} % )",
-                            format_idm_size_3dec(download.durable_bytes),
+                            format_size_3dec(download.durable_bytes),
                             pct_val
                         )
                     } else {
-                        format_idm_size_3dec(download.durable_bytes)
+                        format_size_3dec(download.durable_bytes)
                     };
-                    let rate_str = format_idm_rate_3dec(rate);
-                    let eta_str = format_idm_time_left(
+                    let rate_str = format_rate_3dec(rate);
+                    let eta_str = format_time_left(
                         download.total_size,
                         download.durable_bytes,
                         rate,
@@ -5585,7 +5573,7 @@ fn draw_active_download_progress_dialog(
             // 4. Buttons Row: [ << Hide details ] ............ [ Pause ]  [ Cancel ]
             let (btn_row, _) =
                 ui.allocate_exact_size(egui::vec2(536.0, 24.0), egui::Sense::hover());
-            let idm_button = |ui: &mut egui::Ui, rect: egui::Rect, label: &str| {
+            let dialog_button = |ui: &mut egui::Ui, rect: egui::Rect, label: &str| {
                 ui.put(
                     rect,
                     egui::Button::new(
@@ -5610,7 +5598,7 @@ fn draw_active_download_progress_dialog(
                 egui::pos2(btn_row.left() + 14.0, btn_row.top()),
                 egui::vec2(140.0, 24.0),
             );
-            if idm_button(ui, details_rect, details_label) {
+            if dialog_button(ui, details_rect, details_label) {
                 app.progress_show_details = !app.progress_show_details;
             }
             let cancel_rect = egui::Rect::from_min_size(
@@ -5622,17 +5610,17 @@ fn draw_active_download_progress_dialog(
                 egui::vec2(86.0, 24.0),
             );
             if is_complete {
-                if idm_button(ui, primary_rect, "Open") {
+                if dialog_button(ui, primary_rect, "Open") {
                     open_completed = true;
                 }
             } else {
                 let pause_label = if is_active { "Pause" } else { "Start" };
-                if idm_button(ui, primary_rect, pause_label) {
+                if dialog_button(ui, primary_rect, pause_label) {
                     toggle_pause_resume = true;
                 }
             }
             let close_label = if is_complete { "Close" } else { "Cancel" };
-            if idm_button(ui, cancel_rect, close_label) {
+            if dialog_button(ui, cancel_rect, close_label) {
                 cancel_download = true;
             }
 
@@ -5826,7 +5814,7 @@ fn draw_active_download_progress_dialog(
                         .layout(egui::Layout::top_down(egui::Align::Min)),
                 );
                 egui::ScrollArea::vertical()
-                    .id_salt("idm-conn-rows-scroll")
+                    .id_salt("progress-connection-rows-scroll")
                     .auto_shrink([false, false])
                     .show(&mut rows_ui, |ui| {
                         ui.spacing_mut().item_spacing = egui::vec2(0.0, 0.0);
@@ -5847,7 +5835,7 @@ fn draw_active_download_progress_dialog(
                                 rp.text(
                                     egui::pos2(r_rect.left() + col_n_w + 8.0, r_rect.center().y),
                                     egui::Align2::LEFT_CENTER,
-                                    format_idm_size_3dec(dl),
+                                    format_size_3dec(dl),
                                     egui::FontId::proportional(12.0),
                                     egui::Color32::from_rgb(235, 235, 240),
                                 );
@@ -5923,7 +5911,7 @@ fn draw_forget_download_dialog(app: &mut RajaUi, context: &egui::Context) {
         .show(context, |ui| {
             ui.label(
                 egui::RichText::new(
-                    "Are you sure you want to delete selected downloads from IDM list of downloads?",
+                    "Are you sure you want to delete the selected downloads from the Raja download list?",
                 )
                 .size(12.5)
                 .color(egui::Color32::from_rgb(235, 235, 240)),

@@ -3,6 +3,8 @@
 #[cfg(windows)]
 #[path = "raja_ui/tray.rs"]
 mod tray;
+#[path = "raja_ui/update.rs"]
+mod update;
 
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::io::{BufRead, BufReader};
@@ -163,6 +165,12 @@ struct RajaUi {
     /// When the progress window started waiting for a just-created download
     /// to appear in the list.
     progress_target_wait: Option<Instant>,
+    /// Update check / download state and the box that shows it.
+    update_state: UpdateState,
+    show_update_dialog: bool,
+    update_rx: Option<Receiver<UpdateEvent>>,
+    /// The once-a-day automatic check has been considered this session.
+    auto_update_considered: bool,
     children: Vec<RunningProcess>,
     queue: VecDeque<i64>,
     queue_running: bool,
@@ -457,6 +465,10 @@ impl RajaUi {
             own_window_pos: HashMap::new(),
             own_windows_open: HashMap::new(),
             progress_target_wait: None,
+            update_state: UpdateState::Idle,
+            show_update_dialog: false,
+            update_rx: None,
+            auto_update_considered: false,
             children: Vec::new(),
             queue: VecDeque::new(),
             queue_running: false,
@@ -997,6 +1009,142 @@ impl RajaUi {
             if (wanted - size).abs().max_elem() > 1.0 {
                 self.own_window_size.insert(slot, wanted);
             }
+        }
+    }
+
+    /// Starts a background check for a newer release. A manual check always
+    /// shows the update box; the automatic one only when there is an update.
+    fn start_update_check(&mut self, manual: bool) {
+        if manual {
+            self.show_update_dialog = true;
+        }
+        if matches!(
+            self.update_state,
+            UpdateState::Checking { .. } | UpdateState::Downloading { .. }
+        ) {
+            return;
+        }
+        self.update_state = UpdateState::Checking { manual };
+        let (sender, receiver) = mpsc::channel();
+        self.update_rx = Some(receiver);
+        std::thread::spawn(move || {
+            let _ = sender.send(UpdateEvent::Checked(update::check_latest()));
+        });
+    }
+
+    fn start_update_download(&mut self, info: update::UpdateInfo) {
+        let (sender, receiver) = mpsc::channel();
+        self.update_rx = Some(receiver);
+        self.update_state = UpdateState::Downloading {
+            info: info.clone(),
+            done: 0,
+            total: None,
+        };
+        let directory = std::env::temp_dir().join("Raja-update");
+        std::thread::spawn(move || {
+            let progress_sender = sender.clone();
+            let result = update::download_setup(&info, &directory, |done, total| {
+                let _ = progress_sender.send(UpdateEvent::Progress(done, total));
+            });
+            let _ = sender.send(UpdateEvent::Downloaded(result));
+        });
+    }
+
+    /// Hands over to the downloaded installer and closes Raja so it can be
+    /// replaced; the helper starts Raja again afterwards.
+    fn install_update(&mut self, context: &egui::Context, setup: &std::path::Path) {
+        let Some(relaunch) = update::relaunch_path() else {
+            self.update_state =
+                UpdateState::Failed("Could not find where Raja is installed.".to_owned());
+            return;
+        };
+        match update::start_handover(setup, &relaunch) {
+            Ok(()) => {
+                #[cfg(windows)]
+                {
+                    self.exit_requested = true;
+                }
+                context.send_viewport_cmd(egui::ViewportCommand::Close);
+            }
+            Err(error) => self.update_state = UpdateState::Failed(error),
+        }
+    }
+
+    fn poll_update(&mut self, context: &egui::Context) {
+        if !self.auto_update_considered {
+            self.auto_update_considered = true;
+            let now = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|elapsed| elapsed.as_secs())
+                .unwrap_or(0);
+            let last = Storage::open(&self.database)
+                .ok()
+                .and_then(|storage| storage.setting("last_update_check").ok().flatten())
+                .and_then(|value| value.parse::<u64>().ok())
+                .unwrap_or(0);
+            if now.saturating_sub(last) >= update::CHECK_INTERVAL.as_secs() {
+                self.start_update_check(false);
+            }
+        }
+        let Some(receiver) = &self.update_rx else {
+            return;
+        };
+        let mut finished = false;
+        while let Ok(event) = receiver.try_recv() {
+            match event {
+                UpdateEvent::Checked(result) => {
+                    finished = true;
+                    let manual =
+                        matches!(self.update_state, UpdateState::Checking { manual: true });
+                    if result.is_ok() {
+                        let now = std::time::SystemTime::now()
+                            .duration_since(std::time::UNIX_EPOCH)
+                            .map(|elapsed| elapsed.as_secs())
+                            .unwrap_or(0);
+                        if let Ok(mut storage) = Storage::open(&self.database) {
+                            let _ = storage.set_setting("last_update_check", &now.to_string());
+                        }
+                    }
+                    self.update_state = match result {
+                        Ok(Some(info)) => {
+                            self.show_update_dialog = true;
+                            UpdateState::Available(info)
+                        }
+                        Ok(None) => UpdateState::UpToDate,
+                        Err(error) => UpdateState::Failed(error),
+                    };
+                    if !manual && !matches!(self.update_state, UpdateState::Available(_)) {
+                        // A quiet automatic check: nothing to tell the user.
+                        self.update_state = UpdateState::Idle;
+                    }
+                }
+                UpdateEvent::Progress(now_done, now_total) => {
+                    if let UpdateState::Downloading { done, total, .. } = &mut self.update_state {
+                        *done = now_done;
+                        *total = now_total;
+                    }
+                }
+                UpdateEvent::Downloaded(result) => {
+                    finished = true;
+                    let info = match &self.update_state {
+                        UpdateState::Downloading { info, .. } => Some(info.clone()),
+                        _ => None,
+                    };
+                    self.update_state = match (result, info) {
+                        (Ok(setup), Some(info)) => {
+                            self.show_update_dialog = true;
+                            UpdateState::Ready { info, setup }
+                        }
+                        (Err(error), _) => UpdateState::Failed(error),
+                        (Ok(_), None) => UpdateState::Idle,
+                    };
+                }
+            }
+        }
+        if finished {
+            self.update_rx = None;
+        } else {
+            context.request_repaint_after(Duration::from_millis(200));
         }
     }
 
@@ -2437,6 +2585,7 @@ impl eframe::App for RajaUi {
         #[cfg(windows)]
         self.poll_tray(&context);
         self.poll_browser_inbox(&context);
+        self.poll_update(&context);
         self.poll_children_and_output();
         if self
             .scheduled_queue_at
@@ -2587,6 +2736,9 @@ impl eframe::App for RajaUi {
         }
         if self.show_refresh_address_dialog {
             draw_refresh_address_dialog(self, &context);
+        }
+        if self.show_update_dialog {
+            draw_update_dialog(self, &context);
         }
         if self.show_properties_dialog {
             draw_properties_dialog(self, &context);
@@ -2776,6 +2928,12 @@ fn draw_menu_bar(app: &mut RajaUi, ui: &mut egui::Ui) {
                 ui.menu_button(menu_title("H", "elp"), |ui| {
                     ui.label("RAJA Download Manager");
                     ui.label("Rapid Adaptive Job Accelerator");
+                    ui.separator();
+                    if ui.button("Check for updates...").clicked() {
+                        app.start_update_check(true);
+                        ui.close();
+                    }
+                    ui.label(format!("Version {}", update::current_version()));
                     ui.separator();
                     if ui.button("Tell a Friend...").clicked() {
                         app.show_tell_friend_dialog = true;
@@ -7505,6 +7663,172 @@ fn category_directory_path(base_dir: &str, cat: AddFileCategory) -> String {
         s.push('\\');
     }
     s
+}
+
+enum UpdateEvent {
+    Checked(Result<Option<update::UpdateInfo>, String>),
+    Progress(u64, Option<u64>),
+    Downloaded(Result<PathBuf, String>),
+}
+
+enum UpdateState {
+    Idle,
+    Checking {
+        manual: bool,
+    },
+    UpToDate,
+    Available(update::UpdateInfo),
+    Downloading {
+        info: update::UpdateInfo,
+        done: u64,
+        total: Option<u64>,
+    },
+    Ready {
+        info: update::UpdateInfo,
+        setup: PathBuf,
+    },
+    Failed(String),
+}
+
+fn draw_update_dialog(app: &mut RajaUi, context: &egui::Context) {
+    let mut open = true;
+    let mut action: Option<&'static str> = None;
+    let running = app
+        .downloads
+        .iter()
+        .filter(|download| download.status == "active")
+        .count();
+    egui::Window::new("Raja update")
+        .open(&mut open)
+        .collapsible(false)
+        .resizable(false)
+        .default_width(420.0)
+        .pivot(egui::Align2::CENTER_CENTER)
+        .default_pos(context.content_rect().center())
+        .show(context, |ui| {
+            ui.set_width(420.0);
+            ui.spacing_mut().item_spacing = egui::vec2(8.0, 8.0);
+            let current = update::current_version();
+            match &app.update_state {
+                UpdateState::Idle | UpdateState::Checking { .. } => {
+                    ui.horizontal(|ui| {
+                        ui.spinner();
+                        ui.label("Checking GitHub for a newer version...");
+                    });
+                }
+                UpdateState::UpToDate => {
+                    ui.label(format!("You have the latest version ({current})."));
+                    if ui.button("Close").clicked() {
+                        action = Some("close");
+                    }
+                }
+                UpdateState::Available(info) => {
+                    ui.label(
+                        egui::RichText::new(format!("Raja {} is available.", info.version))
+                            .strong()
+                            .size(14.0),
+                    );
+                    ui.label(format!("You have version {current}."));
+                    if ui.link("What's new (release notes)").clicked() {
+                        let _ = Command::new("explorer.exe").arg(&info.release_page).spawn();
+                    }
+                    if running > 0 {
+                        ui.colored_label(
+                            egui::Color32::from_rgb(255, 190, 120),
+                            format!(
+                                "{running} download(s) running. They stop when Raja closes \
+                                 for the update and can be resumed afterwards."
+                            ),
+                        );
+                    }
+                    ui.horizontal(|ui| {
+                        if ui.button("Download and install").clicked() {
+                            action = Some("download");
+                        }
+                        if ui.button("Later").clicked() {
+                            action = Some("close");
+                        }
+                    });
+                }
+                UpdateState::Downloading { info, done, total } => {
+                    ui.label(format!("Downloading Raja {}...", info.version));
+                    let fraction = total
+                        .filter(|&total| total > 0)
+                        .map(|total| (*done as f32 / total as f32).clamp(0.0, 1.0));
+                    ui.add(
+                        egui::ProgressBar::new(fraction.unwrap_or(0.0)).text(format!(
+                            "{}{}",
+                            format_bytes(*done),
+                            total
+                                .map(|t| format!(" of {}", format_bytes(t)))
+                                .unwrap_or_default()
+                        )),
+                    );
+                    if ui.button("Hide").clicked() {
+                        action = Some("close");
+                    }
+                }
+                UpdateState::Ready { info, .. } => {
+                    ui.label(format!("Raja {} is downloaded.", info.version));
+                    ui.label(if info.sha256.is_some() {
+                        "Checked: its SHA-256 matches the one published on GitHub."
+                    } else {
+                        "Downloaded over HTTPS from GitHub (checksum not available)."
+                    });
+                    ui.label("Raja will close, install the update and start again.");
+                    ui.horizontal(|ui| {
+                        if ui.button("Install now").clicked() {
+                            action = Some("install");
+                        }
+                        if ui.button("Later").clicked() {
+                            action = Some("close");
+                        }
+                    });
+                }
+                UpdateState::Failed(error) => {
+                    ui.colored_label(egui::Color32::from_rgb(255, 150, 140), error);
+                    ui.horizontal(|ui| {
+                        if ui.button("Try again").clicked() {
+                            action = Some("retry");
+                        }
+                        if ui.button("Close").clicked() {
+                            action = Some("close");
+                        }
+                    });
+                }
+            }
+        });
+    if !open {
+        action = Some("close");
+    }
+    match action {
+        Some("close") => {
+            app.show_update_dialog = false;
+            if matches!(
+                app.update_state,
+                UpdateState::UpToDate | UpdateState::Failed(_)
+            ) {
+                app.update_state = UpdateState::Idle;
+            }
+        }
+        Some("download") => {
+            if let UpdateState::Available(info) = &app.update_state {
+                let info = info.clone();
+                app.start_update_download(info);
+            }
+        }
+        Some("install") => {
+            if let UpdateState::Ready { setup, .. } = &app.update_state {
+                let setup = setup.clone();
+                app.install_update(context, &setup);
+            }
+        }
+        Some("retry") => {
+            app.update_state = UpdateState::Idle;
+            app.start_update_check(true);
+        }
+        _ => {}
+    }
 }
 
 /// Shown in the Description column when the user gave no description.

@@ -330,6 +330,7 @@ fn download_one(
     if unfinished_segments == 0 {
         eprintln!("Finishing verified download...");
     } else {
+        let max_parallel = configured_max_parallel_segments(&storage);
         eprintln!(
             "{} {} bytes across {} connection(s)...",
             if has_durable_progress {
@@ -338,7 +339,7 @@ fn download_one(
                 "Downloading"
             },
             remote.size,
-            unfinished_segments.min(MAX_PARALLEL_SEGMENTS),
+            unfinished_segments.min(max_parallel),
         );
         let progress_worker = spawn_progress_reporter(&database_path, download_id)?;
         let download_result = download_segments(
@@ -539,13 +540,24 @@ fn forget_download(
     Ok(())
 }
 
+fn configured_max_parallel_segments(storage: &Storage) -> usize {
+    storage
+        .setting("max_connections")
+        .ok()
+        .flatten()
+        .and_then(|v| v.trim().parse::<usize>().ok())
+        .filter(|&n| (1..=32).contains(&n))
+        .unwrap_or(MAX_PARALLEL_SEGMENTS)
+}
+
 fn create_segments(
     storage: &mut Storage,
     download_id: i64,
     remote: &crate::http::RemoteFile,
 ) -> Result<Vec<i64>, Box<dyn Error>> {
     let can_parallelize = remote.supports_ranges && remote.validators.if_range_value().is_some();
-    let ranges = segment_ranges(remote.size, can_parallelize);
+    let max_parallel = configured_max_parallel_segments(storage);
+    let ranges = segment_ranges_with_max(remote.size, can_parallelize, max_parallel);
     ranges
         .into_iter()
         .map(|(start, end)| {
@@ -556,11 +568,21 @@ fn create_segments(
         .collect()
 }
 
+#[cfg(test)]
 fn segment_ranges(total_size: u64, can_parallelize: bool) -> Vec<(u64, u64)> {
-    if !can_parallelize || total_size < MIN_PARALLEL_SEGMENT_SIZE * 2 {
+    segment_ranges_with_max(total_size, can_parallelize, MAX_PARALLEL_SEGMENTS)
+}
+
+fn segment_ranges_with_max(
+    total_size: u64,
+    can_parallelize: bool,
+    max_parallel: usize,
+) -> Vec<(u64, u64)> {
+    let max_parallel = max_parallel.clamp(1, 32);
+    if !can_parallelize || max_parallel <= 1 || total_size < MIN_PARALLEL_SEGMENT_SIZE * 2 {
         return vec![(0, total_size)];
     }
-    let count = (total_size / MIN_PARALLEL_SEGMENT_SIZE).min(MAX_PARALLEL_SEGMENTS as u64) as usize;
+    let count = (total_size / MIN_PARALLEL_SEGMENT_SIZE).min(max_parallel as u64) as usize;
     let base_size = total_size / count as u64;
     let remainder = total_size % count as u64;
     let mut start = 0;
@@ -588,7 +610,8 @@ fn download_segments(
             pending.push(*segment_id);
         }
     }
-    for batch in pending.chunks(MAX_PARALLEL_SEGMENTS) {
+    let max_parallel = configured_max_parallel_segments(storage);
+    for batch in pending.chunks(max_parallel) {
         if batch.len() == 1 {
             client.download_segment(url, part_file, storage, batch[0])?;
             continue;

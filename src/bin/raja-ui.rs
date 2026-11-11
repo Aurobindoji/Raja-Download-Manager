@@ -172,6 +172,7 @@ struct RajaUi {
     torrent_sort_ascending: bool,
     column_widths: [f32; 8],
     columns_initialized: bool,
+    max_connections: u32,
     schedule_after_minutes: u32,
     scheduled_queue_at: Option<Instant>,
     inbox_poll_at: Instant,
@@ -323,7 +324,20 @@ impl RajaUi {
             std::fs::create_dir_all(parent)?;
         }
         let default_directory = default_download_directory();
-        let saved_directory = Storage::open(&database)?.setting("download_directory")?;
+        let mut init_storage = Storage::open(&database)?;
+        let saved_directory = init_storage.setting("download_directory")?;
+        let saved_max_conn = init_storage
+            .setting("max_connections")?
+            .and_then(|v| v.trim().parse::<u32>().ok())
+            .filter(|&n| matches!(n, 1 | 2 | 4 | 8 | 16 | 32));
+        let max_connections = match saved_max_conn {
+            Some(n) => n,
+            None => {
+                let _ = init_storage.set_setting("max_connections", "8");
+                8
+            }
+        };
+        drop(init_storage);
         let default_download_directory = saved_directory
             .map(PathBuf::from)
             .filter(|directory| directory.is_dir())
@@ -413,6 +427,7 @@ impl RajaUi {
             torrent_sort_ascending: true,
             column_widths: [320.0, 26.0, 82.0, 82.0, 76.0, 90.0, 148.0, 130.0],
             columns_initialized: false,
+            max_connections,
             schedule_after_minutes: 15,
             scheduled_queue_at: None,
             inbox_poll_at: Instant::now() - Duration::from_secs(1),
@@ -943,8 +958,11 @@ impl RajaUi {
             self.fail_video_job(download_id, &msg);
             return false;
         };
+        let conn_count = self.max_connections.clamp(1, 16);
         let mut arguments = vec![
             format!("--dir={dir_str}"),
+            format!("--max-connection-per-server={conn_count}"),
+            format!("--split={}", self.max_connections.clamp(1, 32)),
             "--seed-time=0".to_owned(),
             "--summary-interval=1".to_owned(),
             "--human-readable=false".to_owned(),
@@ -5614,18 +5632,35 @@ fn draw_options_dialog(app: &mut RajaUi, context: &egui::Context) {
     let mut open = true;
     let mut select_directory = false;
     let mut save = false;
-    egui::Window::new("Raja options")
+    egui::Window::new("Raja Options")
         .open(&mut open)
         .collapsible(false)
         .resizable(false)
+        .default_width(440.0)
         .show(context, |ui| {
-            ui.label("Default download directory");
+            ui.label("Default download directory:");
             ui.horizontal(|ui| {
                 ui.add(
                     egui::TextEdit::singleline(&mut app.default_download_directory)
-                        .desired_width(ui.available_width() - 8.0),
+                        .desired_width(ui.available_width() - 80.0),
                 );
                 select_directory = ui.button("Browse...").clicked();
+            });
+            ui.add_space(6.0);
+            ui.horizontal(|ui| {
+                ui.label("Default max. conn. number (कनेक्शन संख्या):");
+                egui::ComboBox::from_id_salt("options-max-connections")
+                    .width(90.0)
+                    .selected_text(format!("{} connections", app.max_connections))
+                    .show_ui(ui, |ui| {
+                        for count in [1u32, 2, 4, 8, 16, 32] {
+                            ui.selectable_value(
+                                &mut app.max_connections,
+                                count,
+                                format!("{count} connections"),
+                            );
+                        }
+                    });
             });
             ui.separator();
             ui.horizontal(|ui| {
@@ -5660,12 +5695,18 @@ fn draw_options_dialog(app: &mut RajaUi, context: &egui::Context) {
             );
             return;
         }
+        let max_conn_str = app.max_connections.to_string();
         match Storage::open(&app.database).and_then(|mut storage| {
-            storage.set_setting("download_directory", directory.to_string_lossy().as_ref())
+            storage.set_setting("download_directory", directory.to_string_lossy().as_ref())?;
+            storage.set_setting("max_connections", &max_conn_str)
         }) {
             Ok(()) => {
                 app.default_download_directory = directory.to_string_lossy().into_owned();
-                app.status = "Default download directory saved.".to_owned();
+                app.status = format!(
+                    "Saved options: directory=\"{}\", max connections={}.",
+                    directory.display(),
+                    app.max_connections
+                );
                 app.show_options_dialog = false;
             }
             Err(error) => app.status = format!("Could not save Raja settings: {error}"),
